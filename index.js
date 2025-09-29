@@ -163,7 +163,6 @@ async function sendMessageViaWebSocket(userId, messageText, characterId, chatId)
   try {
     let ws = wsConnections.get(userId);
 
-
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       ws = await createCharacterAIWebSocket(userId);
       if (!ws) {
@@ -178,7 +177,7 @@ async function sendMessageViaWebSocket(userId, messageText, characterId, chatId)
         throw new Error("failed new chat");
       }
       console.log("new chat at ", chatId);
-      
+
       const session = aiSessions.get(userId);
       if (session) {
         session.chatId = chatId;
@@ -232,18 +231,24 @@ async function sendMessageViaWebSocket(userId, messageText, characterId, chatId)
     ws.send(JSON.stringify(messagePayload));
 
     return new Promise((resolve, reject) => {
-      pendingResponses.set(requestId, resolve);
-      
+      pendingResponses.set(requestId, (response) => {
+        if (!response) {
+          resolve("AI did not respond in time."); // Fallback message
+        } else {
+          resolve(response);
+        }
+      });
+
       setTimeout(() => {
         if (pendingResponses.has(requestId)) {
           pendingResponses.delete(requestId);
-          console.error("ignored message or response timed out");;
+          resolve("AI response timeout."); // Timeout fallback
         }
       }, 30000);
     });
 
   } catch (error) {
-    console.error("error sending msg with websocket: ", error);;
+    console.error("error sending msg with websocket: ", error);
   }
 }
 
@@ -305,7 +310,7 @@ function refreshAISession(userId) {
   // set new timeout
   session.timeout = setTimeout(() => {
     endAISession(userId);
-  }, 30000);
+  }, 60000); // Extend timeout to 60 seconds
 
   return true;
 }
@@ -348,13 +353,14 @@ client.on("messageCreate", async message => {
 
   // check if user is using ai
   if (isInAIMode(user)) {
+    refreshAISession(user);
+
     try {
       // show as typing
       await message.channel.sendTyping();
       const aiResponse = await sendMessageToCharacter(message.content, user);
 
       if (aiResponse) {
-        refreshAISession(user); // timeout counter after the ai responds, not if the ai chooses to ignore the message.
         await message.channel.send(`${aiResponse}`);
       } else {
         return; // ig the ai doesnt even respond sometimes lol
