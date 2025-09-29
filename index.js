@@ -237,7 +237,7 @@ async function sendMessageViaWebSocket(userId, messageText, characterId, chatId)
       setTimeout(() => {
         if (pendingResponses.has(requestId)) {
           pendingResponses.delete(requestId);
-          console.error("ignored message or response timed out", error);;
+          console.error("ignored message or response timed out");;
         }
       }, 30000);
     });
