@@ -365,9 +365,7 @@ client.on("messageCreate", async message => {
       const aiResponse = await sendMessageToCharacter(message.content, user);
 
       if (aiResponse) {
-        // remove stuff in ** if the ai sends it
-        const cleanResponse = aiResponse.replace(/\*[^*]*\*/g, '').trim();
-        await message.channel.send(`${cleanResponse}`);
+        await message.channel.send(`${aiResponse}`);
         // after ai response, cus i think this is the reason that it doesnt work properly
         refreshAISession(user);
       } else {
