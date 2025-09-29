@@ -237,7 +237,7 @@ async function sendMessageViaWebSocket(userId, messageText, characterId, chatId)
       setTimeout(() => {
         if (pendingResponses.has(requestId)) {
           pendingResponses.delete(requestId);
-          resolve("beynim yetmedi");
+          return;
         }
       }, 30000);
     });
