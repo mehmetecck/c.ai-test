@@ -348,14 +348,13 @@ client.on("messageCreate", async message => {
 
   // check if user is using ai
   if (isInAIMode(user)) {
-    refreshAISession(user);
-
     try {
       // show as typing
       await message.channel.sendTyping();
       const aiResponse = await sendMessageToCharacter(message.content, user);
 
       if (aiResponse) {
+        refreshAISession(user); // timeout counter after the ai responds, not if the ai chooses to ignore the message.
         await message.channel.send(`${aiResponse}`);
       } else {
         return; // ig the ai doesnt even respond sometimes lol
