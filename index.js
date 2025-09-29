@@ -94,18 +94,8 @@ function handleWebSocketMessage(userId, message) {
     return;
   }
 
-  if (message.command === "add_turn" && message.turn.author.author_id !== "534643361") {
-    const characterResponse = message.turn.candidates[0].raw_content;
-    const requestId = message.request_id;
-    
-    console.log("ai response: ", characterResponse);
-    
-    const callback = pendingResponses.get(requestId);
-    if (callback) {
-      callback(characterResponse);
-      pendingResponses.delete(requestId);
-    }
-  } else if (message.command === "update_turn" && message.turn.candidates[0].is_final) {
+  // final ai response
+  if (message.command === "update_turn" && message.turn.candidates[0].is_final) {
     const characterResponse = message.turn.candidates[0].raw_content;
     const requestId = message.request_id;
     
@@ -257,7 +247,6 @@ async function sendMessageViaWebSocket(userId, messageText, characterId, chatId)
   }
 }
 
-// Updated message sending function with chat persistence
 async function sendMessageToCharacter(message, userId) {
   try {
     const session = aiSessions.get(userId);
@@ -369,7 +358,7 @@ client.on("messageCreate", async message => {
       if (aiResponse) {
         await message.channel.send(`${aiResponse}`);
       } else {
-        await message.channel.send("couldnt hear you");
+        return; // ig the ai doesnt even respond sometimes lol
       }
 
     } catch (error) {
@@ -413,7 +402,15 @@ client.on("messageCreate", async message => {
       if (CAI_CONFIG.token) {
         startAISession(user);
         refreshAISession(user); // start timer
-        message.channel.send("no u");
+        try {
+          await message.channel.sendTyping();
+          const aiResponse = await sendMessageToCharacter(message.content, user);
+          if (aiResponse) {
+            await message.channel.send(`${aiResponse}`);
+          }
+        } catch (error) {
+          console.error("error when ai-ing: ", error);
+        }
       } else {
         message.channel.send("no u"); // fallback if in case ai isn;t active
       }
