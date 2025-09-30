@@ -257,7 +257,6 @@ async function sendMessageViaWebSocket(userId, messageText, characterId, chatId)
   }
 }
 
-// Updated message sending function with chat persistence
 async function sendMessageToCharacter(message, userId) {
   try {
     const session = aiSessions.get(userId);
@@ -364,14 +363,16 @@ client.on("messageCreate", async message => {
       await message.channel.sendTyping();
       const aiResponse = await sendMessageToCharacter(message.content, user);
 
-      if (aiResponse) {
+      if (aiResponse && aiResponse.trim()) {  // Check if response exists and isn't just whitespace
         // remove stuff in ** if the ai sends it
         const cleanResponse = aiResponse.replace(/\*[^*]*\*/g, '').trim();
-        await message.channel.send(`${cleanResponse}`);
+        if (cleanResponse) { // Only send if there's actual content after cleaning
+          await message.channel.send(`${cleanResponse}`);
+        }
         // after ai response, cus i think this is the reason that it doesnt work properly
         refreshAISession(user);
       } else {
-        await message.channel.send("couldnt hear you");
+        await message.channel.send(`im fucking dumb so i need more time to think. try in like 5 secs.`);
         refreshAISession(user);
       }
 
@@ -379,7 +380,7 @@ client.on("messageCreate", async message => {
       console.error("error when ai-ing: ", error);
     }
 
-    return; // Don"t process other commands while in AI mode
+    return;
   }
 
   // if exit when user types exit
