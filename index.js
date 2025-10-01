@@ -78,7 +78,8 @@ function handleWebSocketMessage(userId, message) {
     console.error("c.ai error: ", message);
     const callback = pendingResponses.get(message.request_id);
     if (callback) {
-      callback("auth token may have expired. issue when connecting to c.ai or issue with c.ai in general...");
+      // callback("auth token may have expired. issue when connecting to c.ai or issue with c.ai in general...");
+      callback("90% c.ai servers crashing rn, 10% my token expired. try again and if it still doesnt work my tokken is poopoo");
       pendingResponses.delete(message.request_id);
     }
     return;
@@ -95,13 +96,13 @@ function handleWebSocketMessage(userId, message) {
   }
 
   if (message.command === "add_turn" && message.turn.author.author_id !== "534643361") {
-    const characterResponse = message.turn.candidates[0].raw_content;
+    const characterResponse = message.turn.candidates[0]?.raw_content;
     const requestId = message.request_id;
     
     console.log("ai response: ", characterResponse);
     
     const callback = pendingResponses.get(requestId);
-    if (callback) {
+    if (callback && characterResponse !== undefined) {
       callback(characterResponse);
       pendingResponses.delete(requestId);
     }
@@ -363,10 +364,13 @@ client.on("messageCreate", async message => {
       await message.channel.sendTyping();
       const aiResponse = await sendMessageToCharacter(message.content, user);
 
-      if (aiResponse && aiResponse.trim()) {  // Check if response exists and isn't just whitespace
+      if (aiResponse === undefined) {
+        await message.channel.send(`‎`);
+        refreshAISession(user);
+      } else if (aiResponse && aiResponse.trim()) {
         // remove stuff in ** if the ai sends it
         const cleanResponse = aiResponse.replace(/\*[^*]*\*/g, '').trim();
-        if (cleanResponse) { // Only send if there's actual content after cleaning
+        if (cleanResponse) {
           await message.channel.send(`${cleanResponse}`);
         }
         // after ai response, cus i think this is the reason that it doesnt work properly
