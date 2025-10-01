@@ -12,9 +12,9 @@ const client = new Client({
 });
 
 const ping = new Map();
-const aiSessions = new Map(); // userId -> { chatId, characterId, timeout }
-const messageBuffer = new Map(); // userId -> { messages: string[], timeout, typingTimeout }
-const userTyping = new Map(); // userId -> boolean
+const aiSessions = new Map(); // sessionKey (userId-channelId) -> { chatId, characterId, timeout, userId, channelId }
+const messageBuffer = new Map(); // sessionKey -> { messages: string[], timeout, typingTimeout }
+const userTyping = new Map(); // sessionKey -> boolean
 
 const CAI_CONFIG = {
   token: process.env.CAI_TOKEN,
@@ -29,7 +29,12 @@ const { v4: uuidv4 } = require("uuid");
 const wsConnections = new Map();
 const pendingResponses = new Map();
 
-async function createCharacterAIWebSocket(userId) {
+// Helper function to create session key
+function getSessionKey(userId, channelId) {
+  return `${userId}-${channelId}`;
+}
+
+async function createCharacterAIWebSocket(sessionKey) {
   try {
     const ws = new WebSocket("wss://neo.character.ai/ws/", {
       headers: {
@@ -41,15 +46,15 @@ async function createCharacterAIWebSocket(userId) {
 
     return new Promise((resolve, reject) => {
       ws.on("open", () => {
-        console.log(`ws connected for ${userId}`);
-        wsConnections.set(userId, ws);
+        console.log(`ws connected for ${sessionKey}`);
+        wsConnections.set(sessionKey, ws);
         resolve(ws);
       });
 
       ws.on("message", (data) => {
         try {
           const message = JSON.parse(data.toString());
-          handleWebSocketMessage(userId, message);
+          handleWebSocketMessage(sessionKey, message);
         } catch (error) {
           console.error("error parsing ws, wth??? ", error);
         }
@@ -57,13 +62,13 @@ async function createCharacterAIWebSocket(userId) {
 
       ws.on("error", (error) => {
         console.error("ws error:", error);
-        wsConnections.delete(userId);
+        wsConnections.delete(sessionKey);
         reject(error);
       });
 
       ws.on("close", () => {
-        console.log(`ws closed for ${userId}`);
-        wsConnections.delete(userId);
+        console.log(`ws closed for ${sessionKey}`);
+        wsConnections.delete(sessionKey);
       });
     });
 
@@ -73,7 +78,7 @@ async function createCharacterAIWebSocket(userId) {
   }
 }
 
-function handleWebSocketMessage(userId, message) {
+function handleWebSocketMessage(sessionKey, message) {
   console.log("ws message:", message.command || message.error || "unknown", message.request_id);
 
   if (message.command === "neo_error" || message.error) {
@@ -121,12 +126,12 @@ function handleWebSocketMessage(userId, message) {
   }
 }
 
-async function createNewChat(userId, characterId) {
+async function createNewChat(sessionKey, characterId) {
   try {
-    let ws = wsConnections.get(userId);
+    let ws = wsConnections.get(sessionKey);
     
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      ws = await createCharacterAIWebSocket(userId);
+      ws = await createCharacterAIWebSocket(sessionKey);
       if (!ws) {
         throw new Error("failed to connect to ws connections");
       }
@@ -171,12 +176,12 @@ async function createNewChat(userId, characterId) {
   }
 }
 
-async function sendMessageViaWebSocket(userId, messageText, characterId, chatId) {
+async function sendMessageViaWebSocket(sessionKey, messageText, characterId, chatId) {
   try {
-    let ws = wsConnections.get(userId);
+    let ws = wsConnections.get(sessionKey);
 
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      ws = await createCharacterAIWebSocket(userId);
+      ws = await createCharacterAIWebSocket(sessionKey);
       if (!ws) {
         throw new Error("failed to connect with ws connections");
       }
@@ -184,13 +189,13 @@ async function sendMessageViaWebSocket(userId, messageText, characterId, chatId)
 
     if (!chatId) {
       console.log("generating new chat... ... ... ");
-      chatId = await createNewChat(userId, characterId);
+      chatId = await createNewChat(sessionKey, characterId);
       if (!chatId) {
         throw new Error("failed new chat");
       }
       console.log("new chat at ", chatId);
       
-      const session = aiSessions.get(userId);
+      const session = aiSessions.get(sessionKey);
       if (session) {
         session.chatId = chatId;
       }
@@ -258,10 +263,11 @@ async function sendMessageViaWebSocket(userId, messageText, characterId, chatId)
   }
 }
 
-async function sendMessageToCharacter(message, userId) {
+async function sendMessageToCharacter(message, sessionKey) {
   try {
-    const session = aiSessions.get(userId);
+    const session = aiSessions.get(sessionKey);
     if (!session) {
+      return;
     }
     
     const characterId = CAI_CONFIG.characterId;
@@ -269,7 +275,7 @@ async function sendMessageToCharacter(message, userId) {
     
     console.log(`sending to c.ai: "${message}"`);
     
-    const response = await sendMessageViaWebSocket(userId, message, characterId, chatId);
+    const response = await sendMessageViaWebSocket(sessionKey, message, characterId, chatId);
     
     return response;
     
@@ -278,13 +284,14 @@ async function sendMessageToCharacter(message, userId) {
   }
 }
 
-function startAISession(userId) {
-  const existingSession = aiSessions.get(userId);
+function startAISession(userId, channelId) {
+  const sessionKey = getSessionKey(userId, channelId);
+  const existingSession = aiSessions.get(sessionKey);
   if (existingSession?.timeout) {
     clearTimeout(existingSession.timeout);
   }
   
-  const existingWS = wsConnections.get(userId);
+  const existingWS = wsConnections.get(sessionKey);
   if (existingWS && existingWS.readyState === WebSocket.OPEN) {
     existingWS.close();
   }
@@ -292,17 +299,18 @@ function startAISession(userId) {
   const session = {
     chatId: null,
     characterId: CAI_CONFIG.characterId,
-    discordUserId: userId,
+    userId: userId,
+    channelId: channelId,
     timeout: null
   };
 
-  aiSessions.set(userId, session);
-  console.log(`user ${userId} is using ai`);
+  aiSessions.set(sessionKey, session);
+  console.log(`user ${userId} is using ai in channel #${channelId}`);
   console.log(`using : ${session.characterId} in c.ai`);
 }
 
-function refreshAISession(userId) {
-  const session = aiSessions.get(userId);
+function refreshAISession(sessionKey) {
+  const session = aiSessions.get(sessionKey);
   if (!session) return false;
 
   if (session.timeout) {
@@ -310,49 +318,50 @@ function refreshAISession(userId) {
   }
 
   session.timeout = setTimeout(() => {
-    endAISession(userId);
+    endAISession(sessionKey);
   }, 60000);
 
   return true;
 }
 
-function endAISession(userId) {
-  const session = aiSessions.get(userId);
+function endAISession(sessionKey) {
+  const session = aiSessions.get(sessionKey);
   if (session?.timeout) {
     clearTimeout(session.timeout);
   }
   
-  const ws = wsConnections.get(userId);
+  const ws = wsConnections.get(sessionKey);
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.close();
   }
-  wsConnections.delete(userId);
+  wsConnections.delete(sessionKey);
   
-  const buffer = messageBuffer.get(userId);
+  const buffer = messageBuffer.get(sessionKey);
   if (buffer?.timeout) {
     clearTimeout(buffer.timeout);
   }
   if (buffer?.typingTimeout) {
     clearTimeout(buffer.typingTimeout);
   }
-  messageBuffer.delete(userId);
-  userTyping.delete(userId);
+  messageBuffer.delete(sessionKey);
+  userTyping.delete(sessionKey);
   
-  aiSessions.delete(userId);
-  console.log(`ai exited for ${userId}`);
+  aiSessions.delete(sessionKey);
+  console.log(`ai exited for ${sessionKey}`);
 }
 
-function isInAIMode(userId) {
-  return aiSessions.has(userId);
+function isInAIMode(userId, channelId) {
+  const sessionKey = getSessionKey(userId, channelId);
+  return aiSessions.has(sessionKey);
 }
 
-async function processBufferedMessages(user, message) {
-  const buffer = messageBuffer.get(user);
+async function processBufferedMessages(sessionKey, message) {
+  const buffer = messageBuffer.get(sessionKey);
   if (!buffer || buffer.messages.length === 0) return;
 
   const bufferedMessages = buffer.messages;
-  messageBuffer.delete(user);
-  userTyping.delete(user);
+  messageBuffer.delete(sessionKey);
+  userTyping.delete(sessionKey);
 
   const formattedMessage = bufferedMessages.map(msg => 
     `{{${message.author.username}}}: ${msg}`
@@ -360,20 +369,20 @@ async function processBufferedMessages(user, message) {
 
   await message.channel.sendTyping();
   
-  const aiResponse = await sendMessageToCharacter(formattedMessage, user);
+  const aiResponse = await sendMessageToCharacter(formattedMessage, sessionKey);
 
   if (aiResponse === undefined) {
     await message.channel.send(`​`);
-    refreshAISession(user);
+    refreshAISession(sessionKey);
   } else if (aiResponse && aiResponse.trim()) {
     const cleanResponse = aiResponse.replace(/\*[^*]*\*/g, '').trim();
     if (cleanResponse) {
       await message.channel.send(`${cleanResponse}`);
     }
-    refreshAISession(user);
+    refreshAISession(sessionKey);
   } else {
     await message.channel.send(`im fucking dumb so i need more time to think. try in like 5 secs.`);
-    refreshAISession(user);
+    refreshAISession(sessionKey);
   }
 }
 
@@ -383,33 +392,37 @@ client.once("ready", () => {
 });
 
 client.on("typingStart", (typing) => {
-  const user = typing.user.id;
+  const userId = typing.user.id;
+  const channelId = typing.channel.id;
+  const sessionKey = getSessionKey(userId, channelId);
   
-  if (!isInAIMode(user)) return;
+  if (!isInAIMode(userId, channelId)) return;
   
-  userTyping.set(user, true);
+  userTyping.set(sessionKey, true);
   
-  const buffer = messageBuffer.get(user);
+  const buffer = messageBuffer.get(sessionKey);
   if (buffer?.typingTimeout) {
     clearTimeout(buffer.typingTimeout);
     buffer.typingTimeout = null;
   }
   
-  console.log(`${typing.user.username} started typing`);
+  console.log(`${typing.user.username} started typing in ${channelId}`);
 });
 
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
 
   const content = message.content.trim().toLowerCase();
-  const user = message.author.id;
+  const userId = message.author.id;
+  const channelId = message.channel.id;
+  const sessionKey = getSessionKey(userId, channelId);
 
-  if (isInAIMode(user)) {
+  if (isInAIMode(userId, channelId)) {
     try {
-      let buffer = messageBuffer.get(user);
+      let buffer = messageBuffer.get(sessionKey);
       if (!buffer) {
         buffer = { messages: [], timeout: null, typingTimeout: null };
-        messageBuffer.set(user, buffer);
+        messageBuffer.set(sessionKey, buffer);
       }
 
       buffer.messages.push(message.content);
@@ -421,12 +434,12 @@ client.on("messageCreate", async message => {
         clearTimeout(buffer.typingTimeout);
       }
 
-      userTyping.set(user, false);
+      userTyping.set(sessionKey, false);
 
       buffer.typingTimeout = setTimeout(async () => {
-        if (!userTyping.get(user)) {
+        if (!userTyping.get(sessionKey)) {
           console.log(`${message.author.username} stopped typing, processing messages`);
-          await processBufferedMessages(user, message);
+          await processBufferedMessages(sessionKey, message);
         }
       }, 3000);
 
@@ -437,9 +450,9 @@ client.on("messageCreate", async message => {
     return;
   }
 
-  if (ping.has(user) && !content.includes("stfu")) {
-    ping.delete(user);
-    console.log(`ping cleared for ${user}, didn"t say stfu...`);
+  if (ping.has(userId) && !content.includes("stfu")) {
+    ping.delete(userId);
+    console.log(`ping cleared for ${userId}, didn"t say stfu...`);
   }
 
   if (["nigga", "nigger", "niga", "nega", "niger"].some(thething => content.includes(thething))) {
@@ -447,13 +460,13 @@ client.on("messageCreate", async message => {
   }
 
   if (content.includes("nazi")) {
-    message.channel.send("✌🪬");
+    message.channel.send("卐🍪");
   }
 
   if (content.includes("<@1421622965958742217>")) {
     if (CAI_CONFIG.token) {
-      startAISession(user);
-      refreshAISession(user);
+      startAISession(userId, channelId);
+      refreshAISession(sessionKey);
       message.reply("fuck you don't ping me bitch");
     } else {
       message.reply("fuck you don't ping me bitch");
@@ -464,13 +477,13 @@ client.on("messageCreate", async message => {
 
 process.on("SIGINT", () => {
   console.log("shutting down");
-  for (const [userId, session] of aiSessions.entries()) {
+  for (const [sessionKey, session] of aiSessions.entries()) {
     if (session.timeout) {
       clearTimeout(session.timeout);
     }
   }
   
-  for (const [userId, ws] of wsConnections.entries()) {
+  for (const [sessionKey, ws] of wsConnections.entries()) {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.close();
     }
