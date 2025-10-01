@@ -6,16 +6,19 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMessageTyping
   ]
 });
 
 const ping = new Map();
 const aiSessions = new Map(); // userId -> { chatId, characterId, timeout }
+const messageBuffer = new Map(); // userId -> { messages: string[], timeout, typingTimeout }
+const userTyping = new Map(); // userId -> boolean
 
 const CAI_CONFIG = {
   token: process.env.CAI_TOKEN,
-  characterId: process.env.CAI_CHARACTER_ID || "oGuQaiFfi-fwZiwBbw8BBY7edbkhuON6zIRWv_6MOA0", // From analytics
+  characterId: process.env.CAI_CHARACTER_ID || "oGuQaiFfi-fwZiwBbw8BBY7edbkhuON6zIRWv_6MOA0",
   baseUrl: "https://character.ai",
   neoUrl: "https://neo.character.ai"
 };
@@ -70,7 +73,6 @@ async function createCharacterAIWebSocket(userId) {
   }
 }
 
-// handle c.ai ws
 function handleWebSocketMessage(userId, message) {
   console.log("ws message:", message.command || message.error || "unknown", message.request_id);
 
@@ -78,7 +80,6 @@ function handleWebSocketMessage(userId, message) {
     console.error("c.ai error: ", message);
     const callback = pendingResponses.get(message.request_id);
     if (callback) {
-      // callback("auth token may have expired. issue when connecting to c.ai or issue with c.ai in general...");
       callback("90% c.ai servers crashing rn, 10% my token expired. try again and if it still doesnt work my tokken is poopoo");
       pendingResponses.delete(message.request_id);
     }
@@ -174,7 +175,6 @@ async function sendMessageViaWebSocket(userId, messageText, characterId, chatId)
   try {
     let ws = wsConnections.get(userId);
 
-
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       ws = await createCharacterAIWebSocket(userId);
       if (!ws) {
@@ -219,7 +219,7 @@ async function sendMessageViaWebSocket(userId, messageText, characterId, chatId)
             author_id: "534643361",
             is_human: true,
             name: "memo",
-            avatar_url: "uploaded/2024/9/30/bg1lcb9D_Hfoz-sU3D-rU1_WnULsymApi4VsD9PJpbQ.webp" // Your avatar
+            avatar_url: "uploaded/2024/9/30/bg1lcb9D_Hfoz-sU3D-rU1_WnULsymApi4VsD9PJpbQ.webp"
           },
           candidates: [{
             candidate_id: candidateId,
@@ -254,7 +254,7 @@ async function sendMessageViaWebSocket(userId, messageText, characterId, chatId)
     });
 
   } catch (error) {
-    console.error("error sending msg with websocket: ", error);;
+    console.error("error sending msg with websocket: ", error);
   }
 }
 
@@ -279,19 +279,16 @@ async function sendMessageToCharacter(message, userId) {
 }
 
 function startAISession(userId) {
-  // clear ws and timeout
   const existingSession = aiSessions.get(userId);
   if (existingSession?.timeout) {
     clearTimeout(existingSession.timeout);
   }
   
-  // close ws
   const existingWS = wsConnections.get(userId);
   if (existingWS && existingWS.readyState === WebSocket.OPEN) {
     existingWS.close();
   }
 
-  // new session
   const session = {
     chatId: null,
     characterId: CAI_CONFIG.characterId,
@@ -308,12 +305,10 @@ function refreshAISession(userId) {
   const session = aiSessions.get(userId);
   if (!session) return false;
 
-  // clear timeout
   if (session.timeout) {
     clearTimeout(session.timeout);
   }
 
-  // set new timeout
   session.timeout = setTimeout(() => {
     endAISession(userId);
   }, 60000);
@@ -327,12 +322,21 @@ function endAISession(userId) {
     clearTimeout(session.timeout);
   }
   
-  // close ws
   const ws = wsConnections.get(userId);
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.close();
   }
   wsConnections.delete(userId);
+  
+  const buffer = messageBuffer.get(userId);
+  if (buffer?.timeout) {
+    clearTimeout(buffer.timeout);
+  }
+  if (buffer?.typingTimeout) {
+    clearTimeout(buffer.typingTimeout);
+  }
+  messageBuffer.delete(userId);
+  userTyping.delete(userId);
   
   aiSessions.delete(userId);
   console.log(`ai exited for ${userId}`);
@@ -342,43 +346,89 @@ function isInAIMode(userId) {
   return aiSessions.has(userId);
 }
 
+async function processBufferedMessages(user, message) {
+  const buffer = messageBuffer.get(user);
+  if (!buffer || buffer.messages.length === 0) return;
 
+  const bufferedMessages = buffer.messages;
+  messageBuffer.delete(user);
+  userTyping.delete(user);
+
+  const formattedMessage = bufferedMessages.map(msg => 
+    `{{${message.author.username}}}: ${msg}`
+  ).join('\n');
+
+  await message.channel.sendTyping();
+  
+  const aiResponse = await sendMessageToCharacter(formattedMessage, user);
+
+  if (aiResponse === undefined) {
+    await message.channel.send(`​`);
+    refreshAISession(user);
+  } else if (aiResponse && aiResponse.trim()) {
+    const cleanResponse = aiResponse.replace(/\*[^*]*\*/g, '').trim();
+    if (cleanResponse) {
+      await message.channel.send(`${cleanResponse}`);
+    }
+    refreshAISession(user);
+  } else {
+    await message.channel.send(`im fucking dumb so i need more time to think. try in like 5 secs.`);
+    refreshAISession(user);
+  }
+}
 
 client.once("ready", () => {
   console.log(`${client.user.tag}`);
   console.log(`c.ai ${CAI_CONFIG.token ? "enabled" : "disabled"}`);
 });
 
+client.on("typingStart", (typing) => {
+  const user = typing.user.id;
+  
+  if (!isInAIMode(user)) return;
+  
+  userTyping.set(user, true);
+  
+  const buffer = messageBuffer.get(user);
+  if (buffer?.typingTimeout) {
+    clearTimeout(buffer.typingTimeout);
+    buffer.typingTimeout = null;
+  }
+  
+  console.log(`${typing.user.username} started typing`);
+});
+
 client.on("messageCreate", async message => {
-  // ignore messages from bots
   if (message.author.bot) return;
 
-  // normalize
   const content = message.content.trim().toLowerCase();
   const user = message.author.id;
 
-  // check if user is using ai
   if (isInAIMode(user)) {
     try {
-      // show as typing
-      await message.channel.sendTyping();
-      const aiResponse = await sendMessageToCharacter(message.content, user);
-
-      if (aiResponse === undefined) {
-        await message.channel.send(`‎`);
-        refreshAISession(user);
-      } else if (aiResponse && aiResponse.trim()) {
-        // remove stuff in ** if the ai sends it
-        const cleanResponse = aiResponse.replace(/\*[^*]*\*/g, '').trim();
-        if (cleanResponse) {
-          await message.channel.send(`${cleanResponse}`);
-        }
-        // after ai response, cus i think this is the reason that it doesnt work properly
-        refreshAISession(user);
-      } else {
-        await message.channel.send(`im fucking dumb so i need more time to think. try in like 5 secs.`);
-        refreshAISession(user);
+      let buffer = messageBuffer.get(user);
+      if (!buffer) {
+        buffer = { messages: [], timeout: null, typingTimeout: null };
+        messageBuffer.set(user, buffer);
       }
+
+      buffer.messages.push(message.content);
+
+      if (buffer.timeout) {
+        clearTimeout(buffer.timeout);
+      }
+      if (buffer.typingTimeout) {
+        clearTimeout(buffer.typingTimeout);
+      }
+
+      userTyping.set(user, false);
+
+      buffer.typingTimeout = setTimeout(async () => {
+        if (!userTyping.get(user)) {
+          console.log(`${message.author.username} stopped typing, processing messages`);
+          await processBufferedMessages(user, message);
+        }
+      }, 3000);
 
     } catch (error) {
       console.error("error when ai-ing: ", error);
@@ -387,14 +437,6 @@ client.on("messageCreate", async message => {
     return;
   }
 
-  // if exit when user types exit
-  // if (content === "exit" && isInAIMode(user)) {
-  //   endAISession(user);
-  //   message.channel.send("im fucking off");
-  //   return;
-  // }
-
-  // check if user is in stfu state
   if (ping.has(user) && !content.includes("stfu")) {
     ping.delete(user);
     console.log(`ping cleared for ${user}, didn"t say stfu...`);
@@ -405,7 +447,7 @@ client.on("messageCreate", async message => {
   }
 
   if (content.includes("nazi")) {
-    message.channel.send("卐🍪");
+    message.channel.send("✌🪬");
   }
 
   if (content.includes("<@1421622965958742217>")) {
@@ -422,14 +464,12 @@ client.on("messageCreate", async message => {
 
 process.on("SIGINT", () => {
   console.log("shutting down");
-  // clear timeout
   for (const [userId, session] of aiSessions.entries()) {
     if (session.timeout) {
       clearTimeout(session.timeout);
     }
   }
   
-  // close ws
   for (const [userId, ws] of wsConnections.entries()) {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.close();
