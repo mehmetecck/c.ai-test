@@ -103,10 +103,16 @@ function handleWebSocketMessage(channelId, message) {
 
   if (message.command === "add_turn" && message.turn.author.author_id !== "534643361") {
     const characterResponse = message.turn.candidates[0]?.raw_content;
+    const requestId = message.request_id;
+    
     console.log("ai response: ", characterResponse);
-  } 
-  
-  if (message.command === "update_turn" && message.turn.candidates[0]?.is_final) {
+    
+    const callback = pendingResponses.get(requestId);
+    if (callback && characterResponse !== undefined) {
+      callback(characterResponse);
+      pendingResponses.delete(requestId);
+    }
+  } else if (message.command === "update_turn" && message.turn.candidates[0].is_final) {
     const characterResponse = message.turn.candidates[0].raw_content;
     const requestId = message.request_id;
     
