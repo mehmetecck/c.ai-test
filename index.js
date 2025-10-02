@@ -374,7 +374,7 @@ function addUserToSession(userId, channelId, username) {
     const session = sharedAISessions.get(channelId);
     if (session && !session.participants.has(userId)) {
       session.participants.add(userId);
-      console.log(`user ${username} (${userId}) joined chats in channel #${channelId}`);
+      console.log(`user ${username} (${userId}) joined chat in channel #${channelId}`);
       console.log(`participants: ${session.participants.size}`);
     }
   }
@@ -388,7 +388,7 @@ async function processBufferedMessages(channelId, channel) {
   messageBuffer.delete(channelId);
 
   const formattedMessage = bufferedMessages.map(msg => 
-    `{{user:${msg.username}}}: ${msg.content}`
+    `{{${msg.username}}}: ${msg.content}`
   ).join('\n');
 
   await channel.sendTyping();
@@ -402,8 +402,18 @@ async function processBufferedMessages(channelId, channel) {
   } else if (aiResponse && aiResponse.trim()) {
     const cleanResponse = aiResponse.replace(/\*[^*]*\*/g, '').trim();
     if (cleanResponse) {
-      const sentMsg = await channel.send(`${cleanResponse}`);
-      botMessages.set(sentMsg.id, channelId);
+      const lines = cleanResponse.split('\n').filter(line => line.trim()); // linebreak = new message
+      
+      for (let i = 0; i < lines.length; i++) {
+        if (i > 0) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+          await channel.sendTyping();
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        
+        const sentMsg = await channel.send(lines[i].trim());
+        botMessages.set(sentMsg.id, channelId);
+      }
     }
     refreshAISession(channelId);
   } else {
