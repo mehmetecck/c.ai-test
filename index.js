@@ -527,7 +527,7 @@ client.on("messageCreate", async message => {
   }
 
   if (content.includes("nazi")) {
-    message.channel.send("卐🍪");
+    message.channel.send("<:swastika:1423282030468403231>🍪");
   }
 
   if (content.includes("<@1421622965958742217>")) {
