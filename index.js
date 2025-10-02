@@ -288,10 +288,12 @@ function startAISession(userId, channelId, username) {
   let session = sharedAISessions.get(channelId);
   
   if (session) {
+    // join chat
     session.participants.add(userId);
     console.log(`user ${username} (${userId}) joined existing ai session in channel #${channelId}`);
     console.log(`participants: ${session.participants.size}`);
   } else {
+    // make new chat
     const existingWS = wsConnections.get(channelId);
     if (existingWS && existingWS.readyState === WebSocket.OPEN) {
       existingWS.close();
@@ -326,7 +328,7 @@ function refreshAISession(channelId) {
 
   session.timeout = setTimeout(() => {
     endAISession(channelId);
-  }, 120000);
+  }, 120000); // 2 minutes for group chats
 
   return true;
 }
@@ -372,7 +374,7 @@ function addUserToSession(userId, channelId, username) {
     const session = sharedAISessions.get(channelId);
     if (session && !session.participants.has(userId)) {
       session.participants.add(userId);
-      console.log(`user ${username} (${userId}) joined ai session in channel #${channelId}`);
+      console.log(`user ${username} (${userId}) joined chats in channel #${channelId}`);
       console.log(`participants: ${session.participants.size}`);
     }
   }
@@ -386,7 +388,7 @@ async function processBufferedMessages(channelId, channel) {
   messageBuffer.delete(channelId);
 
   const formattedMessage = bufferedMessages.map(msg => 
-    `{{${msg.username}}}: ${msg.content}`
+    `{{user:${msg.username}}}: ${msg.content}`
   ).join('\n');
 
   await channel.sendTyping();
@@ -423,15 +425,20 @@ client.on("typingStart", (typing) => {
   
   if (!isInAIMode(channelId)) return;
   
+  const session = sharedAISessions.get(channelId);
+  if (!session || !session.participants.has(userId)) return;
+  
   userTyping.set(sessionKey, true);
   
-  const buffer = messageBuffer.get(channelId);
-  if (buffer) {
-    buffer.typingUsers = buffer.typingUsers || new Set();
-    buffer.typingUsers.add(userId);
+  let buffer = messageBuffer.get(channelId);
+  if (!buffer) {
+    buffer = { messages: [], timeout: null, typingUsers: new Set() };
+    messageBuffer.set(channelId, buffer);
   }
   
-  console.log(`${typing.user.username} started typing in ${channelId}`);
+  buffer.typingUsers.add(userId);
+  
+  console.log(`${typing.user.username} started typing in ${channelId} (active typists: ${buffer.typingUsers.size})`);
 });
 
 client.on("messageCreate", async message => {
@@ -471,22 +478,26 @@ client.on("messageCreate", async message => {
         }
 
         userTyping.set(sessionKey, false);
-        if (buffer.typingUsers) {
-          buffer.typingUsers.delete(userId);
-        }
+        buffer.typingUsers.delete(userId);
+        
+        console.log(`${message.author.username} sent message (still typing: ${buffer.typingUsers.size})`);
 
-        buffer.timeout = setTimeout(async () => {
-          const typingUsers = buffer.typingUsers || new Set();
-          const anyoneTyping = Array.from(typingUsers).some(uid => {
+        const checkAndProcess = async () => {
+          const stillTyping = Array.from(buffer.typingUsers).some(uid => {
             const key = getSessionKey(uid, channelId);
             return userTyping.get(key) === true;
           });
 
-          if (!anyoneTyping) {
+          if (!stillTyping && buffer.messages.length > 0) {
             console.log(`all users stopped typing in ${channelId}, processing messages`);
             await processBufferedMessages(channelId, message.channel);
+          } else if (stillTyping) {
+            console.log(`waiting for every1 to finish typing... `);
+            buffer.timeout = setTimeout(checkAndProcess, 3000);
           }
-        }, 3000);
+        };
+
+        buffer.timeout = setTimeout(checkAndProcess, 3000);
 
       } catch (error) {
         console.error("error when ai-ing: ", error);
