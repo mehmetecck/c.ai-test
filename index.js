@@ -78,14 +78,16 @@ async function createCharacterAIWebSocket(channelId) {
   }
 }
 
+
 function handleWebSocketMessage(channelId, message) {
   console.log("ws message:", message.command || message.error || "unknown", message.request_id);
 
   if (message.command === "neo_error" || message.error) {
     console.error("c.ai error: ", message);
-    const callback = pendingResponses.get(message.request_id);
-    if (callback) {
-      callback("90% c.ai servers crashing rn, 10% my token expired. try again and if it still doesnt work my tokken is poopoo");
+    const pending = pendingResponses.get(message.request_id);
+    if (pending) {
+      if (pending.fallbackTimeout) clearTimeout(pending.fallbackTimeout);
+      pending.resolve("90% c.ai servers crashing rn, 10% my token expired. try again and if it still doesnt work my tokken is poopoo");
       pendingResponses.delete(message.request_id);
     }
     return;
@@ -93,9 +95,9 @@ function handleWebSocketMessage(channelId, message) {
 
   if (message.command === "create_chat_response") {
     console.log("chat generated");
-    const callback = pendingResponses.get(message.request_id);
-    if (callback) {
-      callback();
+    const pending = pendingResponses.get(message.request_id);
+    if (pending) {
+      pending.resolve();
       pendingResponses.delete(message.request_id);
     }
     return;
@@ -107,10 +109,21 @@ function handleWebSocketMessage(channelId, message) {
     
     console.log("ai response: ", characterResponse);
     
-    const callback = pendingResponses.get(requestId);
-    if (callback && characterResponse !== undefined) {
-      callback(characterResponse);
-      pendingResponses.delete(requestId);
+    const pending = pendingResponses.get(requestId);
+    if (pending && characterResponse !== undefined) {
+      pending.intermediateResponse = characterResponse;
+      
+      // fallback timeout
+      if (pending.fallbackTimeout) {
+        clearTimeout(pending.fallbackTimeout);
+      }
+      pending.fallbackTimeout = setTimeout(() => {
+        console.log("no final response received, using intermediate");
+        if (pendingResponses.has(requestId)) {
+          pending.resolve(pending.intermediateResponse);
+          pendingResponses.delete(requestId);
+        }
+      }, 1000); // final response wait
     }
   } else if (message.command === "update_turn" && message.turn.candidates[0].is_final) {
     const characterResponse = message.turn.candidates[0].raw_content;
@@ -118,9 +131,12 @@ function handleWebSocketMessage(channelId, message) {
     
     console.log("final ai response: ", characterResponse);
     
-    const callback = pendingResponses.get(requestId);
-    if (callback) {
-      callback(characterResponse);
+    const pending = pendingResponses.get(requestId);
+    if (pending) {
+      if (pending.fallbackTimeout) {
+        clearTimeout(pending.fallbackTimeout);
+      }
+      pending.resolve(characterResponse);
       pendingResponses.delete(requestId);
     }
   }
@@ -158,8 +174,10 @@ async function createNewChat(channelId, characterId) {
     ws.send(JSON.stringify(createChatPayload));
 
     return new Promise((resolve, reject) => {
-      pendingResponses.set(requestId, () => {
-        resolve(chatId);
+      pendingResponses.set(requestId, {
+        resolve: () => resolve(chatId),
+        intermediateResponse: null,
+        fallbackTimeout: null
       });
       
       setTimeout(() => {
@@ -248,10 +266,16 @@ async function sendMessageViaWebSocket(channelId, messageText, characterId, chat
     ws.send(JSON.stringify(messagePayload));
 
     return new Promise((resolve, reject) => {
-      pendingResponses.set(requestId, resolve);
+      pendingResponses.set(requestId, {
+        resolve,
+        intermediateResponse: null,
+        fallbackTimeout: null
+      });
       
       setTimeout(() => {
         if (pendingResponses.has(requestId)) {
+          const pending = pendingResponses.get(requestId);
+          if (pending.fallbackTimeout) clearTimeout(pending.fallbackTimeout);
           pendingResponses.delete(requestId);
           resolve("beynim yetmedi");
         }
