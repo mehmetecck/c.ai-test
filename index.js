@@ -13,7 +13,7 @@ const client = new Client({
 
 const ping = new Map();
 const sharedAISessions = new Map(); // channelId -> { chatId, characterId, timeout, participants: Set(userId), lastActivity }
-const messageBuffer = new Map(); // channelId -> { messages: Array<{userId, username, content, messageId}>, timeout, typingUsers: Set(userId) }
+const messageBuffer = new Map(); // channelId -> { messages: Array<{userId, username, content}>, timeout, typingUsers: Set(userId) }
 const userTyping = new Map(); // userId-channelId -> boolean
 const botMessages = new Map(); // messageId -> channelId (to track bot messages for replies)
 
@@ -123,7 +123,7 @@ function handleWebSocketMessage(channelId, message) {
           pending.resolve(pending.intermediateResponse);
           pendingResponses.delete(requestId);
         }
-      }, 1000); // final response wait
+      }, 3000); // final response wait
     }
   } else if (message.command === "update_turn" && message.turn.candidates[0].is_final) {
     const characterResponse = message.turn.candidates[0].raw_content;
@@ -404,37 +404,6 @@ function addUserToSession(userId, channelId, username) {
   }
 }
 
-function extractUserTokenAndFindMessage(text, bufferedMessages) {
-  // always {{ }}
-  const tokenRegex = /\{\{([^}]+)\}\}/g;
-  const matches = [...text.matchAll(tokenRegex)];
-  
-  if (matches.length === 0) {
-    return { cleanedText: text, replyToMessageId: null };
-  }
-  
-  let lastMentionedUsername = null;
-  for (let i = matches.length - 1; i >= 0; i--) {
-    const username = matches[i][1].trim();
-  }
-  
-  const cleanedText = text.replace(tokenRegex, '').trim(); // remove
-
-  // find last message by that user
-  let replyToMessageId = null;
-  if (lastMentionedUsername && bufferedMessages) {
-    for (let i = bufferedMessages.length - 1; i >= 0; i--) {
-      if (bufferedMessages[i].username === lastMentionedUsername) {
-        replyToMessageId = bufferedMessages[i].messageId;
-        console.log(`msg has token: {{${lastMentionedUsername}}} replying to message... `);
-        break;
-      }
-    }
-  }
-
-  return { cleanedText, replyToMessageId };
-}
-
 async function processBufferedMessages(channelId, channel) {
   const buffer = messageBuffer.get(channelId);
   if (!buffer || buffer.messages.length === 0) return;
@@ -457,7 +426,7 @@ async function processBufferedMessages(channelId, channel) {
   } else if (aiResponse && aiResponse.trim()) {
     const cleanResponse = aiResponse.replace(/\*[^*]*\*/g, '').trim();
     if (cleanResponse) {
-      const lines = cleanResponse.split('\n').filter(line => line.trim()); // linebreak = new message
+      const lines = cleanResponse.split('\n').filter(line => line.trim());
       
       for (let i = 0; i < lines.length; i++) {
         if (i > 0) {
@@ -466,26 +435,49 @@ async function processBufferedMessages(channelId, channel) {
           await new Promise(resolve => setTimeout(resolve, 500));
         }
         
-        const line = lines[i].trim();
+        let lineContent = lines[i].trim();
+        let replyToUserId = null;
         
-        // check if has user tokens
-        const { cleanedText, replyToMessageId } = extractUserTokenAndFindMessage(line, bufferedMessages);
-        
-        let sentMsg;
-        if (replyToMessageId) {
-          // reply to message
-          try {
-            const messageToReply = await channel.messages.fetch(replyToMessageId);
-            sentMsg = await messageToReply.reply(cleanedText);
-          } catch (error) {
-            console.error("Failed to reply to message:", error);
-            sentMsg = await channel.send(cleanedText);
+        const tokenMatch = lineContent.match(/^{{(.+?)}}\s*/); // awlays {{ }}
+        if (tokenMatch) {
+          const mentionedUsername = tokenMatch[1];
+          lineContent = lineContent.replace(/^{{.+?}}:\s*/, '').trim();
+          
+          const userMsg = bufferedMessages.find(msg => 
+            msg.username.toLowerCase() === mentionedUsername.toLowerCase()
+          );
+          
+          if (userMsg) {
+            replyToUserId = userMsg.userId;
           }
-        } else {
-          sentMsg = await channel.send(cleanedText);
         }
         
-        botMessages.set(sentMsg.id, channelId);
+        if (lineContent) {
+          // find last message from the user to reply to
+          let sentMsg;
+          if (replyToUserId) {
+            try {
+              // find last messages
+              const recentMessages = await channel.messages.fetch({ limit: 50 });
+              const userLastMessage = recentMessages.find(msg => 
+                msg.author.id === replyToUserId && !msg.author.bot
+              );
+              
+              if (userLastMessage) {
+                sentMsg = await userLastMessage.reply(lineContent);
+              } else {
+                sentMsg = await channel.send(lineContent);
+              }
+            } catch (error) {
+              console.error("error replying to user:", error);
+              sentMsg = await channel.send(lineContent);
+            }
+          } else {
+            sentMsg = await channel.send(lineContent);
+          }
+          
+          botMessages.set(sentMsg.id, channelId);
+        }
       }
     }
     refreshAISession(channelId);
@@ -553,8 +545,7 @@ client.on("messageCreate", async message => {
         buffer.messages.push({
           userId: userId,
           username: message.author.username,
-          content: message.content,
-          messageId: message.id  // messageid for replies
+          content: message.content
         });
 
         if (buffer.timeout) {
@@ -607,6 +598,8 @@ client.on("messageCreate", async message => {
   if (content.includes("<@1421622965958742217>")) {
     if (CAI_CONFIG.token) {
       startAISession(userId, channelId, message.author.username);
+      await message.channel.sendTyping();
+      await new Promise(resolve => setTimeout(resolve, 500));
       const reply = await message.reply("fuck you don't ping me bitch");
       botMessages.set(reply.id, channelId);
     } else {
