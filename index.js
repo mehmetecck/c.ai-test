@@ -1,5 +1,5 @@
 require("dotenv").config();
-const { Client, GatewayIntentBits } = require("discord.js");
+const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const fetch = require("node-fetch");
 
 const client = new Client({
@@ -10,7 +10,8 @@ const client = new Client({
     GatewayIntentBits.GuildMessageTyping,
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.DirectMessageTyping
-  ]
+  ],
+  partials: [Partials.Channel, Partials.Message]
 });
 
 const ping = new Map();
@@ -336,7 +337,7 @@ function startAISession(userId, channelId, username, isDM = false) {
     };
 
     sharedAISessions.set(channelId, session);
-    console.log(`user ${username} (${userId}) started ai session in ${isDM ? 'DM' : `channel #${channelId}`}`);
+    console.log(`user ${username} (${userId}) started ai session in ${isDM ? 'dm' : `channel #${channelId}`}`);
     console.log(`using : ${session.characterId} in c.ai`);
   }
   
@@ -353,8 +354,8 @@ function refreshAISession(channelId) {
 
   session.lastActivity = Date.now();
 
-  // dms have 10 min timeouts
-  const timeoutDuration = session.isDM ? 300000 : 120000;
+  // dms 10 mins
+  const timeoutDuration = session.isDM ? 600000 : 30000;
 
   session.timeout = setTimeout(() => {
     endAISession(channelId);
@@ -532,9 +533,6 @@ client.on("typingStart", (typing) => {
   const session = sharedAISessions.get(channelId);
   if (!session || !session.participants.has(userId)) return;
   
-  // no need for this in dms
-  if (session.isDM) return;
-  
   userTyping.set(sessionKey, true);
   
   let buffer = messageBuffer.get(channelId);
@@ -551,27 +549,80 @@ client.on("typingStart", (typing) => {
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
 
+  console.log(`message @ ${message.guild ? `server ${message.guild.name}` : 'dm'} from @${message.author.username}: ${message.content}`);
+
   const content = message.content.trim().toLowerCase();
   const userId = message.author.id;
   const channelId = message.channel.id;
   const sessionKey = getSessionKey(userId, channelId);
-  const isDM = message.channel.type === 1;
+  const isDM = !message.guild; // check if msg is from dms
+
+  console.log(`dm: ${isDM}, channel: #${channelId}`);
 
   if (isDM) {
+    console.log(`dm process from user #${message.author.username}`);
+    
     if (!CAI_CONFIG.token) {
+      console.log("no cai token");
       await message.reply("c.ai is not configured");
       return;
     }
 
     if (!isInAIMode(channelId)) {
+      console.log(`starting new ai chat in dms for #${message.author.username}`);
       startAISession(userId, channelId, message.author.username, true);
     }
 
-    await processDMMessage(channelId, message.channel, userId, message.author.username, message.content);
-    return;
+    const session = sharedAISessions.get(channelId);
+    
+    if (session && session.participants.has(userId)) {
+      try {
+        let buffer = messageBuffer.get(channelId);
+        if (!buffer) {
+          buffer = { messages: [], timeout: null, typingUsers: new Set() };
+          messageBuffer.set(channelId, buffer);
+        }
+
+        buffer.messages.push({
+          userId: userId,
+          username: message.author.username,
+          content: message.content
+        });
+
+        if (buffer.timeout) {
+          clearTimeout(buffer.timeout);
+        }
+
+        userTyping.set(sessionKey, false);
+        buffer.typingUsers.delete(userId);
+        
+        console.log(`${message.author.username} sent dm (still typing: ${buffer.typingUsers.size})`);
+
+        const checkAndProcess = async () => {
+          const stillTyping = Array.from(buffer.typingUsers).some(uid => {
+            const key = getSessionKey(uid, channelId);
+            return userTyping.get(key) === true;
+          });
+
+          if (!stillTyping && buffer.messages.length > 0) {
+            console.log(`user stopped typing in dm ${channelId}, processing messages`);
+            await processBufferedMessages(channelId, message.channel);
+          } else if (stillTyping) {
+            console.log(`waiting for user to finish typing in dm...`);
+            buffer.timeout = setTimeout(checkAndProcess, 3000);
+          }
+        };
+
+        buffer.timeout = setTimeout(checkAndProcess, 3000);
+
+      } catch (error) {
+        console.error("error when ai-ing in dm: ", error);
+      }
+
+      return;
+    }
   }
 
-  // not dm
   if (message.reference && message.reference.messageId) {
     const replyChannelId = botMessages.get(message.reference.messageId);
     if (replyChannelId === channelId && isInAIMode(channelId)) {
