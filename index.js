@@ -7,12 +7,14 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMessageTyping
+    GatewayIntentBits.GuildMessageTyping,
+    GatewayIntentBits.DirectMessages,
+    GatewayIntentBits.DirectMessageTyping
   ]
 });
 
 const ping = new Map();
-const sharedAISessions = new Map(); // channelId -> { chatId, characterId, timeout, participants: Set(userId), lastActivity }
+const sharedAISessions = new Map(); // channelId -> { chatId, characterId, timeout, participants: Set(userId), lastActivity, isDM }
 const messageBuffer = new Map(); // channelId -> { messages: Array<{userId, username, content}>, timeout, typingUsers: Set(userId) }
 const userTyping = new Map(); // userId-channelId -> boolean
 const botMessages = new Map(); // messageId -> channelId (to track bot messages for replies)
@@ -308,7 +310,7 @@ async function sendMessageToCharacter(message, channelId) {
   }
 }
 
-function startAISession(userId, channelId, username) {
+function startAISession(userId, channelId, username, isDM = false) {
   let session = sharedAISessions.get(channelId);
   
   if (session) {
@@ -329,11 +331,12 @@ function startAISession(userId, channelId, username) {
       channelId: channelId,
       participants: new Set([userId]),
       timeout: null,
-      lastActivity: Date.now()
+      lastActivity: Date.now(),
+      isDM: isDM
     };
 
     sharedAISessions.set(channelId, session);
-    console.log(`user ${username} (${userId}) started ai session in channel #${channelId}`);
+    console.log(`user ${username} (${userId}) started ai session in ${isDM ? 'DM' : `channel #${channelId}`}`);
     console.log(`using : ${session.characterId} in c.ai`);
   }
   
@@ -350,9 +353,12 @@ function refreshAISession(channelId) {
 
   session.lastActivity = Date.now();
 
+  // dms have 10 min timeouts
+  const timeoutDuration = session.isDM ? 300000 : 120000;
+
   session.timeout = setTimeout(() => {
     endAISession(channelId);
-  }, 120000); // 2 minutes for group chats
+  }, timeoutDuration);
 
   return true;
 }
@@ -441,7 +447,7 @@ async function processBufferedMessages(channelId, channel) {
         const tokenMatch = lineContent.match(/^{{(.+?)}}\s*/); // awlays {{ }}
         if (tokenMatch) {
           const mentionedUsername = tokenMatch[1];
-          lineContent = lineContent.replace(/^{{.+?}}:\s*/, '').trim();
+          lineContent = lineContent.replace(/^{{.+?}}\s*/, '').trim();
           
           const userMsg = bufferedMessages.find(msg => 
             msg.username.toLowerCase() === mentionedUsername.toLowerCase()
@@ -488,6 +494,29 @@ async function processBufferedMessages(channelId, channel) {
   }
 }
 
+async function processDMMessage(channelId, channel, userId, username, messageContent) {
+  await channel.sendTyping();
+  
+  const aiResponse = await sendMessageToCharacter(messageContent, channelId);
+
+  if (aiResponse === undefined) {
+    const sentMsg = await channel.send(`​`);
+    botMessages.set(sentMsg.id, channelId);
+    refreshAISession(channelId);
+  } else if (aiResponse && aiResponse.trim()) {
+    const cleanResponse = aiResponse.replace(/\*[^*]*\*/g, '').trim();
+    if (cleanResponse) {
+      const sentMsg = await channel.send(cleanResponse);
+      botMessages.set(sentMsg.id, channelId);
+    }
+    refreshAISession(channelId);
+  } else {
+    const sentMsg = await channel.send(`im fucking dumb so i need more time to think. try in like 5 secs.`);
+    botMessages.set(sentMsg.id, channelId);
+    refreshAISession(channelId);
+  }
+}
+
 client.once("ready", () => {
   console.log(`${client.user.tag}`);
   console.log(`c.ai ${CAI_CONFIG.token ? "enabled" : "disabled"}`);
@@ -502,6 +531,9 @@ client.on("typingStart", (typing) => {
   
   const session = sharedAISessions.get(channelId);
   if (!session || !session.participants.has(userId)) return;
+  
+  // no need for this in dms
+  if (session.isDM) return;
   
   userTyping.set(sessionKey, true);
   
@@ -523,7 +555,23 @@ client.on("messageCreate", async message => {
   const userId = message.author.id;
   const channelId = message.channel.id;
   const sessionKey = getSessionKey(userId, channelId);
+  const isDM = message.channel.type === 1;
 
+  if (isDM) {
+    if (!CAI_CONFIG.token) {
+      await message.reply("c.ai is not configured");
+      return;
+    }
+
+    if (!isInAIMode(channelId)) {
+      startAISession(userId, channelId, message.author.username, true);
+    }
+
+    await processDMMessage(channelId, message.channel, userId, message.author.username, message.content);
+    return;
+  }
+
+  // not dm
   if (message.reference && message.reference.messageId) {
     const replyChannelId = botMessages.get(message.reference.messageId);
     if (replyChannelId === channelId && isInAIMode(channelId)) {
@@ -592,7 +640,7 @@ client.on("messageCreate", async message => {
   }
 
   if (content.includes("nazi")) {
-    message.channel.send("<:swastika:1423282030468403231>🍪");
+    message.channel.send("<:swastika:1423282030468403231>🪖");
   }
 
   if (content.includes("<@1421622965958742217>")) {
