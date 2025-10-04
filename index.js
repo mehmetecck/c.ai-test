@@ -527,10 +527,13 @@ client.once("ready", () => {
 
 async function registerSlashCommands() {
   const commands = [
-    new SlashCommandBuilder()
-      .setName('bitchass')
-      .setDescription('talk to bitchass')
-  ].map(command => command.toJSON());
+    {
+      name: 'bitchass',
+      description: 'talk to bitchass',
+      integration_types: [0, 1], // 0 = GUILD_INSTALL, 1 = USER_INSTALL
+      contexts: [0, 1, 2] // 0 = GUILD, 1 = BOT_DM, 2 = PRIVATE_CHANNEL (group dms)
+    }
+  ];
 
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
@@ -542,7 +545,7 @@ async function registerSlashCommands() {
       { body: commands }
     );
     
-    console.log('finished registerig slash... ');
+    console.log('slash command registered.');
   } catch (error) {
     console.error('error registering slash: ', error);
   }
