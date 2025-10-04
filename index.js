@@ -1,5 +1,5 @@
 require("dotenv").config();
-const { Client, GatewayIntentBits, Partials } = require("discord.js");
+const { Client, GatewayIntentBits, Partials, REST, Routes, SlashCommandBuilder } = require("discord.js");
 const fetch = require("node-fetch");
 
 const client = new Client({
@@ -521,6 +521,54 @@ async function processDMMessage(channelId, channel, userId, username, messageCon
 client.once("ready", () => {
   console.log(`${client.user.tag}`);
   console.log(`c.ai ${CAI_CONFIG.token ? "enabled" : "disabled"}`);
+  
+  registerSlashCommands();
+});
+
+async function registerSlashCommands() {
+  const commands = [
+    new SlashCommandBuilder()
+      .setName('bitchass')
+      .setDescription('talk to bitchass')
+  ].map(command => command.toJSON());
+
+  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+
+  try {
+    console.log('slash command register... ');
+    
+    await rest.put(
+      Routes.applicationCommands(client.user.id),
+      { body: commands }
+    );
+    
+    console.log('finished registerig slash... ');
+  } catch (error) {
+    console.error('error registering slash: ', error);
+  }
+}
+
+client.on("interactionCreate", async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+
+  const { commandName, channelId, user, channel } = interaction;
+
+  if (commandName === 'bitchass') {
+    if (!CAI_CONFIG.token) {
+      await interaction.reply({ content: 'c.ai doesnt exist', ephemeral: true });
+      return;
+    }
+
+    const isDM = !interaction.guild;
+    
+    if (isInAIMode(channelId)) {
+      await interaction.reply({ content: 'ur already talking to bitchass in here. ', ephemeral: true });
+      return;
+    }
+
+    startAISession(user.id, channelId, user.username, isDM);
+      console.log(`${user.username} started bitchass session in ${isDM ? 'dm' : `channel #${channelId}`} with slash commands... `);
+  }
 });
 
 client.on("typingStart", (typing) => {
@@ -623,6 +671,7 @@ client.on("messageCreate", async message => {
     }
   }
 
+    // messages in servers 
   if (message.reference && message.reference.messageId) {
     const replyChannelId = botMessages.get(message.reference.messageId);
     if (replyChannelId === channelId && isInAIMode(channelId)) {
