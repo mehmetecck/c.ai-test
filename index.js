@@ -1,5 +1,5 @@
 require("dotenv").config();
-const { Client, GatewayIntentBits, Partials, REST, Routes, SlashCommandBuilder } = require("discord.js");
+const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const fetch = require("node-fetch");
 
 const client = new Client({
@@ -431,7 +431,9 @@ async function processBufferedMessages(channelId, channel) {
     botMessages.set(sentMsg.id, channelId);
     refreshAISession(channelId);
   } else if (aiResponse && aiResponse.trim()) {
-    const cleanResponse = aiResponse.replace(/\*[^*]*\*/g, '').trim();
+    const cleanResponse = aiResponse
+      .replace(/\*[^*]*\*/g, '') // remove italic roleplay
+      .replace(': ', '') // remove first ": ""
     if (cleanResponse) {
       const lines = cleanResponse.split('\n').filter(line => line.trim());
       
@@ -521,57 +523,6 @@ async function processDMMessage(channelId, channel, userId, username, messageCon
 client.once("ready", () => {
   console.log(`${client.user.tag}`);
   console.log(`c.ai ${CAI_CONFIG.token ? "enabled" : "disabled"}`);
-  
-  registerSlashCommands();
-});
-
-async function registerSlashCommands() {
-  const commands = [
-    {
-      name: 'bitchass',
-      description: 'talk to bitchass',
-      integration_types: [0, 1], // 0 = GUILD_INSTALL, 1 = USER_INSTALL
-      contexts: [0, 1, 2] // 0 = GUILD, 1 = BOT_DM, 2 = PRIVATE_CHANNEL (group dms)
-    }
-  ];
-
-  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-
-  try {
-    console.log('slash command register... ');
-    
-    await rest.put(
-      Routes.applicationCommands(client.user.id),
-      { body: commands }
-    );
-    
-    console.log('slash command registered.');
-  } catch (error) {
-    console.error('error registering slash: ', error);
-  }
-}
-
-client.on("interactionCreate", async interaction => {
-  if (!interaction.isChatInputCommand()) return;
-
-  const { commandName, channelId, user, channel } = interaction;
-
-  if (commandName === 'bitchass') {
-    if (!CAI_CONFIG.token) {
-      await interaction.reply({ content: 'c.ai doesnt exist', ephemeral: true });
-      return;
-    }
-
-    const isDM = !interaction.guild;
-    
-    if (isInAIMode(channelId)) {
-      await interaction.reply({ content: 'ur already talking to bitchass in here. ', ephemeral: true });
-      return;
-    }
-
-    startAISession(user.id, channelId, user.username, isDM);
-      console.log(`${user.username} started bitchass session in ${isDM ? 'dm' : `channel #${channelId}`} with slash commands... `);
-  }
 });
 
 client.on("typingStart", (typing) => {
@@ -674,7 +625,6 @@ client.on("messageCreate", async message => {
     }
   }
 
-    // messages in servers 
   if (message.reference && message.reference.messageId) {
     const replyChannelId = botMessages.get(message.reference.messageId);
     if (replyChannelId === channelId && isInAIMode(channelId)) {
