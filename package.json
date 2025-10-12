@@ -18,10 +18,20 @@
   },
   "homepage": "https://github.com/colyst/discord#readme",
   "dependencies": {
+    "aws-amplify": "^6.15.7",
     "discord.js": "^14.22.1",
     "dotenv": "^17.2.2",
     "node-fetch": "^3.3.2",
     "uuid": "^13.0.0",
     "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@aws-amplify/backend": "^1.16.1",
+    "@aws-amplify/backend-cli": "^1.8.0",
+    "aws-cdk-lib": "^2.204.0",
+    "constructs": "^10.4.2",
+    "esbuild": "^0.25.10",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
   }
 }

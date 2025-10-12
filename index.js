@@ -350,14 +350,20 @@ function refreshAISession(channelId) {
   if (session.timeout) {
     clearTimeout(session.timeout);
   }
-
+  
   session.lastActivity = Date.now();
 
   // dms have 10 min timeouts
   const timeoutDuration = session.isDM ? 300000 : 120000;
-
+  
   session.timeout = setTimeout(() => {
-    endAISession(channelId);
+    const now = Date.now();
+    const timeSinceLastActivity = now - session.lastActivity;
+    
+    if (timeSinceLastActivity >= timeoutDuration) {
+      console.log(`Session ${channelId} timed out after ${Math.floor(timeSinceLastActivity/1000)}s of inactivity`);
+      endAISession(channelId);
+    }
   }, timeoutDuration);
 
   return true;
@@ -428,7 +434,6 @@ async function processBufferedMessages(channelId, channel) {
   if (aiResponse === undefined) {
     const sentMsg = await channel.send(`​`);
     botMessages.set(sentMsg.id, channelId);
-    refreshAISession(channelId);
   } else if (aiResponse && aiResponse.trim()) {
     const cleanResponse = aiResponse
       .replace(/\*[^*]*\*/g, '') // remove italic roleplay
@@ -505,19 +510,17 @@ async function processDMMessage(channelId, channel, userId, username, messageCon
   if (aiResponse === undefined) {
     const sentMsg = await channel.send(`​`);
     botMessages.set(sentMsg.id, channelId);
-    refreshAISession(channelId);
   } else if (aiResponse && aiResponse.trim()) {
     const cleanResponse = aiResponse.replace(/\*[^*]*\*/g, '').trim();
     if (cleanResponse) {
       const sentMsg = await channel.send(cleanResponse);
       botMessages.set(sentMsg.id, channelId);
     }
-    refreshAISession(channelId);
   } else {
     const sentMsg = await channel.send(`im fucking dumb so i need more time to think. try in like 5 secs.`);
     botMessages.set(sentMsg.id, channelId);
-    refreshAISession(channelId);
   }
+  refreshAISession(channelId);
 }
 
 client.once("ready", () => {
@@ -617,9 +620,11 @@ client.on("messageCreate", async message => {
           if (!stillTyping && buffer.messages.length > 0) {
             console.log(`all users stopped typing in ${channelId}, processing messages`);
             await processBufferedMessages(channelId, message.channel);
+            refreshAISession(channelId);
           } else if (stillTyping) {
             console.log(`waiting for every1 to finish typing... `);
             buffer.timeout = setTimeout(checkAndProcess, 3000);
+            refreshAISession(channelId);
           }
         };
 
