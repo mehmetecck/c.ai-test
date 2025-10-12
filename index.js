@@ -433,6 +433,7 @@ async function processBufferedMessages(channelId, channel) {
     const cleanResponse = aiResponse
       .replace(/\*[^*]*\*/g, '') // remove italic roleplay
       .replace(': ', '') // remove first ": "
+      .replace('-', '') // FUCK YOU BITCHASS YOU THINK YOU CAN CALL MY BLUFF
     if (cleanResponse) {
       const lines = cleanResponse.split('\n').filter(line => line.trim());
       
