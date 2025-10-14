@@ -120,7 +120,7 @@ function handleWebSocketMessage(channelId, message) {
         clearTimeout(pending.fallbackTimeout);
       }
       pending.fallbackTimeout = setTimeout(() => {
-        console.log("no final response received, using intermediate");
+        console.log("no final response received so using the first response");
         if (pendingResponses.has(requestId)) {
           pending.resolve(pending.intermediateResponse);
           pendingResponses.delete(requestId);
@@ -361,7 +361,7 @@ function refreshAISession(channelId) {
     const timeSinceLastActivity = now - session.lastActivity;
     
     if (timeSinceLastActivity >= timeoutDuration) {
-      console.log(`Session ${channelId} timed out after ${Math.floor(timeSinceLastActivity/1000)}s of inactivity`);
+      console.log(`ai session ${channelId} quit after ${Math.floor(timeSinceLastActivity/1000)}sceonds of no user messages`);
       endAISession(channelId);
     }
   }, timeoutDuration);
@@ -438,7 +438,6 @@ async function processBufferedMessages(channelId, channel) {
     const cleanResponse = aiResponse
       .replace(/\*[^*]*\*/g, '') // remove italic roleplay
       .replace(': ', '') // remove first ": "
-      .replace('-', '') // FUCK YOU BITCHASS YOU THINK YOU CAN CALL MY BLUFF
     if (cleanResponse) {
       const lines = cleanResponse.split('\n').filter(line => line.trim());
       
@@ -483,7 +482,7 @@ async function processBufferedMessages(channelId, channel) {
                 sentMsg = await channel.send(lineContent);
               }
             } catch (error) {
-              console.error("error replying to user:", error);
+              console.error("error when replying to the user:", error);
               sentMsg = await channel.send(lineContent);
             }
           } else {
@@ -551,10 +550,10 @@ client.on("typingStart", (typing) => {
   
   buffer.typingUsers.add(userId);
   
-  console.log(`${typing.user.username} started typing in ${channelId} (active typists: ${buffer.typingUsers.size})`);
+  console.log(`${typing.user.username} started typing in ${channelId} (active: ${buffer.typingUsers.size})`);
 });
 
-client.on("messageCreate", async message => {
+client.on("messagecreate", async message => {
   if (message.author.bot) return;
 
   const content = message.content.trim().toLowerCase();
@@ -638,17 +637,12 @@ client.on("messageCreate", async message => {
     }
   }
 
-  if (ping.has(userId) && !content.includes("stfu")) {
-    ping.delete(userId);
-    console.log(`ping cleared for ${userId}, didn"t say stfu...`);
-  }
-
   if (["nigga", "nigger", "niga", "nega", "niger"].some(thething => content.includes(thething))) {
     message.channel.send("i forgive u 🙏");
   }
 
   if (content.includes("nazi")) {
-    message.channel.send("<:swastika:1423282030468403231>🪖");
+    message.channel.send("<:swastika:1423282030468403231>🍪");
   }
 
   if (content.includes("<@1421622965958742217>")) {
