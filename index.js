@@ -411,7 +411,7 @@ function addUserToSession(userId, channelId, username) {
     if (session && !session.participants.has(userId)) {
       session.participants.add(userId);
       console.log(`user ${username} (${userId}) joined chat in channel #${channelId}`);
-      console.log(`participants: ${session.participants.size}`);
+      console.log(`users: ${session.participants.size}`);
     }
   }
 }
@@ -438,7 +438,12 @@ async function processBufferedMessages(channelId, channel) {
     const cleanResponse = aiResponse
       .replace(/\*[^*]*\*/g, '') // remove italic roleplay
       .replace(': ', '') // remove first ": "
-    if (cleanResponse) {
+    
+    // check if bitchass wants to end the converstaion
+    const endconvo = cleanResponse.includes("END_CONVERSATION");
+    const finalResponse = cleanResponse.replace(/END_CONVERSATION/g, '').trim();
+
+    if (finalResponse) {
       const lines = cleanResponse.split('\n').filter(line => line.trim());
       
       for (let i = 0; i < lines.length; i++) {
@@ -493,6 +498,17 @@ async function processBufferedMessages(channelId, channel) {
         }
       }
     }
+    
+    if (endconvo) {
+      await channel.send("bitchass wanted to stop talking to you sry -memo");
+      const session = sharedAISessions.get(channelId);
+      if (session) {
+        clearTimeout(session.timeout);
+        sharedAISessions.delete(channelId);
+      }
+      return;
+    }
+    
     refreshAISession(channelId);
   } else {
     const sentMsg = await channel.send(`im fucking dumb so i need more time to think. try in like 5 secs.`);
@@ -553,7 +569,7 @@ client.on("typingStart", (typing) => {
   console.log(`${typing.user.username} started typing in ${channelId} (active: ${buffer.typingUsers.size})`);
 });
 
-client.on("messagecreate", async message => {
+client.on("messageCreate", async message => {
   if (message.author.bot) return;
 
   const content = message.content.trim().toLowerCase();
@@ -645,6 +661,18 @@ client.on("messagecreate", async message => {
     message.channel.send("<:swastika:1423282030468403231>🍪");
   }
 
+  if (content.includes("swastika cookie")) {
+    message.channel.send({files: ["./audio/oh, this can't be happening.mp3"]});
+  }
+
+  if (["mahmut killibag", "mahmut kıllıbağ"].some(thething => content.includes(thething))) {
+    message.channel.send({files: ["./audio/mahmut killibag.mp3"]});
+  }
+
+  if (content.includes("indiaman")) {
+    message.channel.send({files: ["./audio/indiamann.mp3"]});
+  }
+  
   if (content.includes("<@1421622965958742217>")) {
     if (CAI_CONFIG.token) {
       startAISession(userId, channelId, message.author.username);
