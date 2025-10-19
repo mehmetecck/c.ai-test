@@ -662,19 +662,19 @@ client.on("messageCreate", async message => {
   }
 
   if (content.includes("swastika cookie")) {
-    message.channel.send({files: ["./audio/oh, this can't be happening.mp3"]});
+    message.channel.send({files: ["./bin/oh, this can't be happening.mp3"]});
   }
 
   if (["mahmut killibag", "mahmut kıllıbağ"].some(thething => content.includes(thething))) {
-    message.channel.send({files: ["./audio/mahmut killibag.mp3"]});
+    message.channel.send({files: ["./bin/mahmut killibag.mp3"]});
   }
 
   if (content.includes("indiaman")) {
-    message.channel.send({files: ["./audio/indiamann.mp3"]});
+    message.channel.send({files: ["./bin/indiamann.mp3"]});
   }
 
   if (content.includes("celeste")) {
-    message.channel.send({files: ["./audio/celeste.mp3"]});
+    message.channel.send({files: ["./bin/celeste.mp3"]});
   }
 
   if (content.includes("zurna")) {
@@ -682,7 +682,7 @@ client.on("messageCreate", async message => {
   }
 
   if (content.includes("kanye east")) {
-    message.channel.send({files: ["./audio/kanye east.mp3"]});
+    message.channel.send({files: ["./bin/kanye east.mp3"]});
   }
 
   if (content.includes("<@1421622965958742217>")) {
