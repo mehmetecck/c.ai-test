@@ -1,0 +1,37 @@
+name: auto deploy yml
+
+on:
+  push:
+    branches:
+      - ai-multi-test
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v4
+
+      - name: setup node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: install dependencies
+        run: npm ci
+
+      - name: zip source code
+        run: zip -r deploy.zip . -x '*.git*' '*.github*' 'node_modules/*'
+
+      - name: deploy to gag
+        uses: einaregilsson/beanstalk-deploy@v22
+        with:
+          application_name: c.ai-test
+          environment_name: bitchass
+          region: us-west-2
+          version_label: ${{ github.run_number }}
+          deployment_package: deploy.zip
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

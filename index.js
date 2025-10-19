@@ -672,7 +672,19 @@ client.on("messageCreate", async message => {
   if (content.includes("indiaman")) {
     message.channel.send({files: ["./audio/indiamann.mp3"]});
   }
-  
+
+  if (content.includes("celeste")) {
+    message.channel.send({files: ["./audio/celeste.mp3"]});
+  }
+
+  if (content.includes("zurna")) {
+    message.channel.send("https://tenor.com/view/kulağa-zurnaçaldıran-dayı-kulak-zurna-gif-27573616");
+  }
+
+  if (content.includes("kanye east")) {
+    message.channel.send({files: ["./audio/kanye east.mp3"]});
+  }
+
   if (content.includes("<@1421622965958742217>")) {
     if (CAI_CONFIG.token) {
       startAISession(userId, channelId, message.author.username);
