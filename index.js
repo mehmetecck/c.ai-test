@@ -39,7 +39,7 @@ let vectorMemory = [];
 // load existing memories on startup
 if (fs.existsSync(MEMORY_FILE)) {
     vectorMemory = JSON.parse(fs.readFileSync(MEMORY_FILE));
-    console.log(`Loaded ${vectorMemory.length} memories from disk.`);
+    console.log(`loaded ${vectorMemory.length} memory(s) from file.`);
 }
 
 // function to convert text to vectors
@@ -162,7 +162,12 @@ why don't you go play with some spiders`;
       body: JSON.stringify({
         model: "bitchass_adv", 
         messages: messagesPayload, // <--- FIX: actually send the RAG payload
-        stream: false
+        stream: false,
+        options: {
+          temperature: 1.15,    // default is usually 0.8. Higher = more creative/chaotic.
+          repeat_penalty: 1.2,  // default is 1.1. Higher = heavily penalizes repeating exact phrases.
+          top_p: 0.95           // default is 0.9. Higher = wider variety of vocabulary.
+        }
       })
     });
 
@@ -176,7 +181,7 @@ why don't you go play with some spiders`;
     // --- REASONING EXTRACTION ---
     const thoughtMatch = aiResponse.match(/<think>([\s\S]*?)<\/think>/i);
     if (thoughtMatch) {
-      console.log(`\n[BITCHASS THOUGHTS]:\n${thoughtMatch[1].trim()}\n`);
+      console.log(`\n[thinking]:\n${thoughtMatch[1].trim()}\n`);
     }
 
     let finalCleanResponse = aiResponse.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
@@ -309,12 +314,12 @@ async function processBufferedMessages(channelId, channel) {
     const sentMsg = await channel.send(`​`);
     botMessages.set(sentMsg.id, channelId);
   } else if (aiResponse && aiResponse.trim()) {
-    const cleanResponse = aiResponse.replace(/\*[^*]*\*/g, '').replace(': ', '');
-    
-    const endconvo = cleanResponse.includes("END_CONVERSATION");
-    const finalResponse = cleanResponse.replace(/END_CONVERSATION/g, '').trim();
+    let cleanResponse = aiResponse.replace(/\*[^*]*\*/g, '').replace(/^:\s*/, '');
+    const endconvo = cleanResponse.includes("{{END_CONVERSATION}}");
+    cleanResponse = cleanResponse.replace(/\{\{END_CONVERSATION\}\}/g, '').trim();
 
-    if (finalResponse) {
+    // now use the cleaned response to build the lines
+    if (cleanResponse) {
       const lines = cleanResponse.split('\n').filter(line => line.trim());
       
       for (let i = 0; i < lines.length; i++) {
@@ -327,10 +332,10 @@ async function processBufferedMessages(channelId, channel) {
         let lineContent = lines[i].trim();
         let replyToUserId = null;
         
-        const tokenMatch = lineContent.match(/^{{(.+?)}}\s*/);
+        // find ANY {{username}} tag in the line (removed the ^ anchor)
+        const tokenMatch = lineContent.match(/\{\{(.+?)\}\}/);
         if (tokenMatch) {
           const mentionedUsername = tokenMatch[1];
-          lineContent = lineContent.replace(/^{{.+?}}\s*/, '').trim();
           
           const userMsg = bufferedMessages.find(msg => 
             msg.username.toLowerCase() === mentionedUsername.toLowerCase()
@@ -340,6 +345,9 @@ async function processBufferedMessages(channelId, channel) {
             replyToUserId = userMsg.userId;
           }
         }
+        
+        // strip ALL remaining {{...}} tags from the line so it looks clean in chat
+        lineContent = lineContent.replace(/\{\{.+?\}\}/g, '').trim();
         
         if (lineContent) {
           let sentMsg;
@@ -370,7 +378,6 @@ async function processBufferedMessages(channelId, channel) {
     
     if (endconvo) {
       await channel.send("-# bitchass wanted to stop talking to you sry");
-      // this will now trigger evaluateSessionMemories AND clean up the session
       endAISession(channelId); 
       return;
     }
@@ -395,16 +402,14 @@ async function processDMMessage(channelId, channel, userId, username, messageCon
     const sentMsg = await channel.send(`​`);
     botMessages.set(sentMsg.id, channelId);
   } else if (aiResponse && aiResponse.trim()) {
-    const cleanResponse = aiResponse.replace(/\*[^*]*\*/g, '').trim();
+    const cleanResponse = aiResponse.replace(/\*[^*]*\*/g, '').replace(/\{\{.+?\}\}/g, '').trim();
+      
     if (cleanResponse) {
       const sentMsg = await channel.send(cleanResponse);
       botMessages.set(sentMsg.id, channelId);
     }
-  } else {
-    const sentMsg = await channel.send(`im fucking dumb so i need more time to think. try in like 5 secs.`);
-    botMessages.set(sentMsg.id, channelId);
-  }
   refreshAISession(channelId);
+  }
 }
 
 // analyze
@@ -417,7 +422,7 @@ async function evaluateSessionMemories(history, channelId) {
   // clean the history: remove <think> tags and format it as a readable script
   const cleanHistory = history.map(msg => {
     let cleanContent = msg.content.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-    return `${msg.role === 'user' ? 'User' : 'Bitchass'}: ${cleanContent}`;
+    return `${msg.role === 'user' ? 'User' : 'bitchass'}: ${cleanContent}`;
   }).join('\n');
 
   const extractionPrompt = `
@@ -436,7 +441,7 @@ async function evaluateSessionMemories(history, channelId) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "bitchass_adv", // Use the exact same model that is already in VRAM!
+        model: "bitchass_adv", 
         system: "You are a neutral, analytical AI background process. Your only job is data extraction. Output strict JSON.",
         prompt: extractionPrompt,
         stream: false,
@@ -449,7 +454,8 @@ async function evaluateSessionMemories(history, channelId) {
     if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
 
     const data = await response.json();
-    const extractedData = JSON.parse(data.response);
+    const cleanJsonString = data.response.replace(/```json/gi, '').replace(/```/gi, '').trim();
+    const extractedData = JSON.parse(cleanJsonString);
 
     // --- UPDATED STORAGE LOGIC ---
     if (Array.isArray(extractedData) && extractedData.length > 0) {
@@ -472,7 +478,7 @@ async function evaluateSessionMemories(history, channelId) {
 
 client.once("clientReady", () => {
   console.log(`${client.user.tag} is online`);
-  console.log(`ollama online`);
+  console.log(`ollama is online`);
   
   const songPaths = Object.values(SONGS);
   voiceHandler.preloadSongs(songPaths);
@@ -648,7 +654,7 @@ client.on("messageCreate", async message => {
     message.channel.send({files: ["./bin/kanye east.mp3"]});
   }
 
-  if (content.includes("<@1421622965958742217>")) {
+  if (content.includes(`<@${client.user.id}>`)) {
     startAISession(userId, channelId, message.author.username);
     await message.channel.sendTyping();
     const reply = await message.reply("fuck you don't ping me bitch");
