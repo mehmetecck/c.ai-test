@@ -2,6 +2,14 @@
 .env
 node_modules/
 
+index copy 2.js
+index copy.js
+memories.json
+.gitignore
+
+# dumb eb thing
+c.ai-test.zip
+
 # amplify
 .amplify
 amplify_outputs*

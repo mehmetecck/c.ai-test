@@ -1,6 +1,10 @@
+const fs = require('fs');
+process.chdir(__dirname);
+
 require("dotenv").config();
 const { Client, GatewayIntentBits } = require("discord.js");
 const fetch = require("node-fetch");
+const voiceHandler = require("./voiceHandler");
 
 const client = new Client({
   intents: [
@@ -9,304 +13,182 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMessageTyping,
     GatewayIntentBits.DirectMessages,
-    GatewayIntentBits.DirectMessageTyping
+    GatewayIntentBits.DirectMessageTyping,
+    GatewayIntentBits.GuildVoiceStates
   ]
 });
 
-const ping = new Map();
-const sharedAISessions = new Map(); // channelId -> { chatId, characterId, timeout, participants: Set(userId), lastActivity, isDM }
+const sharedAISessions = new Map(); // channelId -> { history: Array, timeout, participants: Set(userId), lastActivity, isDM }
 const messageBuffer = new Map(); // channelId -> { messages: Array<{userId, username, content}>, timeout, typingUsers: Set(userId) }
 const userTyping = new Map(); // userId-channelId -> boolean
 const botMessages = new Map(); // messageId -> channelId (to track bot messages for replies)
 
-const CAI_CONFIG = {
-  token: process.env.CAI_TOKEN,
-  characterId: process.env.CAI_CHARACTER_ID || "oGuQaiFfi-fwZiwBbw8BBY7edbkhuON6zIRWv_6MOA0",
-  baseUrl: "https://character.ai",
-  neoUrl: "https://neo.character.ai"
+const SONGS = {
+  "kanye east": "./bin/kanye east.mp3",
+  "mahmut killibag": "./bin/mahmut killibag.mp3",
+  "indiaman": "./bin/indiamann.mp3",
+  "swastika cookie": "./bin/oh, this can't be happening.mp3",
+  "bitch ass": "./bin/bitchass.mp3",
+  "celeste": "./bin/celeste.mp3"
 };
 
-const WebSocket = require("ws");
-const { v4: uuidv4 } = require("uuid");
+// --- VECTOR DATABASE SETUP ---
+const MEMORY_FILE = './memories.json';
+let vectorMemory = [];
 
-const wsConnections = new Map();
-const pendingResponses = new Map();
+// load existing memories on startup
+if (fs.existsSync(MEMORY_FILE)) {
+    vectorMemory = JSON.parse(fs.readFileSync(MEMORY_FILE));
+    console.log(`Loaded ${vectorMemory.length} memories from disk.`);
+}
+
+// function to convert text to vectors
+async function getEmbedding(text) {
+    const response = await fetch("http://localhost:11434/api/embeddings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            model: "nomic-embed-text",
+            prompt: text
+        })
+    });
+    const data = await response.json();
+    return data.embedding;
+}
+
+// function to find how closely related two ide1as are
+function cosineSimilarity(vecA, vecB) {
+    let dotProduct = 0, normA = 0, normB = 0;
+    for (let i = 0; i < vecA.length; i++) {
+        dotProduct += vecA[i] * vecB[i];
+        normA += vecA[i] * vecA[i];
+        normB += vecB[i] * vecB[i];
+    }
+    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+}
 
 function getSessionKey(userId, channelId) {
   return `${userId}-${channelId}`;
 }
 
-async function createCharacterAIWebSocket(channelId) {
-  try {
-    const ws = new WebSocket("wss://neo.character.ai/ws/", {
-      headers: {
-        "Origin": "https://character.ai",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Authorization": `Token ${CAI_CONFIG.token}`, 
-      }
-    });
-
-    return new Promise((resolve, reject) => {
-      ws.on("open", () => {
-        console.log(`ws connected for channel ${channelId}`);
-        wsConnections.set(channelId, ws);
-        resolve(ws);
-      });
-
-      ws.on("message", (data) => {
-        try {
-          const message = JSON.parse(data.toString());
-          handleWebSocketMessage(channelId, message);
-        } catch (error) {
-          console.error("error parsing ws, wth??? ", error);
-        }
-      });
-
-      ws.on("error", (error) => {
-        console.error("ws error:", error);
-        wsConnections.delete(channelId);
-        reject(error);
-      });
-
-      ws.on("close", () => {
-        console.log(`ws closed for channel ${channelId}`);
-        wsConnections.delete(channelId);
-      });
-    });
-
-  } catch (error) {
-    console.error("error generating ws: ", error);
-    return null;
-  }
-}
-
-
-function handleWebSocketMessage(channelId, message) {
-  console.log("ws message:", message.command || message.error || "unknown", message.request_id);
-
-  if (message.command === "neo_error" || message.error) {
-    console.error("c.ai error: ", message);
-    const pending = pendingResponses.get(message.request_id);
-    if (pending) {
-      if (pending.fallbackTimeout) clearTimeout(pending.fallbackTimeout);
-      pending.resolve("90% c.ai servers crashing rn, 10% my token expired. try again and if it still doesnt work my tokken is poopoo");
-      pendingResponses.delete(message.request_id);
-    }
-    return;
-  }
-
-  if (message.command === "create_chat_response") {
-    console.log("chat generated");
-    const pending = pendingResponses.get(message.request_id);
-    if (pending) {
-      pending.resolve();
-      pendingResponses.delete(message.request_id);
-    }
-    return;
-  }
-
-  if (message.command === "add_turn" && message.turn.author.author_id !== "534643361") {
-    const characterResponse = message.turn.candidates[0]?.raw_content;
-    const requestId = message.request_id;
-    
-    console.log("ai response: ", characterResponse);
-    
-    const pending = pendingResponses.get(requestId);
-    if (pending && characterResponse !== undefined) {
-      pending.intermediateResponse = characterResponse;
-      
-      // fallback timeout
-      if (pending.fallbackTimeout) {
-        clearTimeout(pending.fallbackTimeout);
-      }
-      pending.fallbackTimeout = setTimeout(() => {
-        console.log("no final response received so using the first response");
-        if (pendingResponses.has(requestId)) {
-          pending.resolve(pending.intermediateResponse);
-          pendingResponses.delete(requestId);
-        }
-      }, 3000); // final response wait
-    }
-  } else if (message.command === "update_turn" && message.turn.candidates[0].is_final) {
-    const characterResponse = message.turn.candidates[0].raw_content;
-    const requestId = message.request_id;
-    
-    console.log("final ai response: ", characterResponse);
-    
-    const pending = pendingResponses.get(requestId);
-    if (pending) {
-      if (pending.fallbackTimeout) {
-        clearTimeout(pending.fallbackTimeout);
-      }
-      pending.resolve(characterResponse);
-      pendingResponses.delete(requestId);
-    }
-  }
-}
-
-async function createNewChat(channelId, characterId) {
-  try {
-    let ws = wsConnections.get(channelId);
-    
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      ws = await createCharacterAIWebSocket(channelId);
-      if (!ws) {
-        throw new Error("failed to connect to ws connections");
-      }
-    }
-
-    const requestId = uuidv4();
-    const chatId = uuidv4();
-
-    const createChatPayload = {
-      command: "create_chat",
-      request_id: requestId,
-      payload: {
-        chat: {
-          chat_id: chatId,
-          creator_id: "534643361",
-          visibility: "VISIBILITY_PRIVATE",
-          character_id: characterId,
-          type: "TYPE_ONE_ON_ONE"
-        }
-      },
-      origin_id: "web-next"
-    };
-
-    ws.send(JSON.stringify(createChatPayload));
-
-    return new Promise((resolve, reject) => {
-      pendingResponses.set(requestId, {
-        resolve: () => resolve(chatId),
-        intermediateResponse: null,
-        fallbackTimeout: null
-      });
-      
-      setTimeout(() => {
-        if (pendingResponses.has(requestId)) {
-          pendingResponses.delete(requestId);
-          reject(new Error("chat generation timeout"));
-        }
-      }, 10000);
-    });
-
-  } catch (error) {
-    console.error("error when generating new chat:", error);
-    return null;
-  }
-}
-
-async function sendMessageViaWebSocket(channelId, messageText, characterId, chatId, username) {
-  try {
-    let ws = wsConnections.get(channelId);
-
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      ws = await createCharacterAIWebSocket(channelId);
-      if (!ws) {
-        throw new Error("failed to connect with ws connections");
-      }
-    }
-
-    if (!chatId) {
-      console.log("generating new chat... ... ... ");
-      chatId = await createNewChat(channelId, characterId);
-      if (!chatId) {
-        throw new Error("failed new chat");
-      }
-      console.log("new chat at ", chatId);
-      
-      const session = sharedAISessions.get(channelId);
-      if (session) {
-        session.chatId = chatId;
-      }
-    }
-
-    const requestId = uuidv4();
-    const turnId = uuidv4();
-    const candidateId = uuidv4();
-
-    const messagePayload = {
-      command: "create_and_generate_turn",
-      request_id: requestId,
-      payload: {
-        chat_type: "TYPE_ONE_ON_ONE",
-        num_candidates: 1,
-        tts_enabled: false,
-        selected_language: "",
-        character_id: characterId,
-        user_name: username || "memo",
-        turn: {
-          turn_key: {
-            turn_id: turnId,
-            chat_id: chatId
-          },
-          author: {
-            author_id: "534643361",
-            is_human: true,
-            name: username || "memo",
-            avatar_url: "uploaded/2024/9/30/bg1lcb9D_Hfoz-sU3D-rU1_WnULsymApi4VsD9PJpbQ.webp"
-          },
-          candidates: [{
-            candidate_id: candidateId,
-            raw_content: messageText
-          }],
-          primary_candidate_id: candidateId
-        },
-        previous_annotations: {
-          boring: 0, not_boring: 0, inaccurate: 0, not_inaccurate: 0,
-          repetitive: 0, not_repetitive: 0, out_of_character: 0, not_out_of_character: 0,
-          bad_memory: 0, not_bad_memory: 0, long: 0, not_long: 0,
-          short: 0, not_short: 0, ends_chat_early: 0, not_ends_chat_early: 0,
-          funny: 0, not_funny: 0, interesting: 0, not_interesting: 0,
-          helpful: 0, not_helpful: 0
-        },
-        generate_comparison: false
-      },
-      origin_id: "web-next"
-    };
-
-    ws.send(JSON.stringify(messagePayload));
-
-    return new Promise((resolve, reject) => {
-      pendingResponses.set(requestId, {
-        resolve,
-        intermediateResponse: null,
-        fallbackTimeout: null
-      });
-      
-      setTimeout(() => {
-        if (pendingResponses.has(requestId)) {
-          const pending = pendingResponses.get(requestId);
-          if (pending.fallbackTimeout) clearTimeout(pending.fallbackTimeout);
-          pendingResponses.delete(requestId);
-          resolve("beynim yetmedi");
-        }
-      }, 60000);
-    });
-
-  } catch (error) {
-    console.error("error sending msg with websocket: ", error);
-  }
-}
-
 async function sendMessageToCharacter(message, channelId) {
   try {
     const session = sharedAISessions.get(channelId);
-    if (!session) {
-      return;
+    if (!session) return;
+
+    if (!session.history) session.history = [];
+
+    // push the raw user message to the permanent history
+    session.history.push({ role: "user", content: message });
+
+    // keep history manageable
+    if (session.history.length > 15) {
+      session.history.shift(); 
     }
+
+    // --- RAG: MEMORY RETRIEVAL ---
+    const currentEmbedding = await getEmbedding(message);
     
-    const characterId = CAI_CONFIG.characterId;
-    const chatId = session.chatId;
+    const scoredMemories = vectorMemory.map(mem => ({
+        user: mem.user,
+        text: mem.text,
+        score: cosineSimilarity(currentEmbedding, mem.embedding)
+    })).sort((a, b) => b.score - a.score);
+
+    const relevantMemories = scoredMemories.filter(m => m.score > 0.5).slice(0, 3);
     
-    console.log(`sending to c.ai: "${message}"`);
+    // create a DEEP COPY of the history so we don't mutate the permanent session log
+    let messagesPayload = session.history.map(msg => ({ ...msg })); 
+
+    // define the base system prompt
+    let systemPromptContent = `You are "bitchass", a sarcastic, extremely annoyed 21-year-old brat from Konya, Turkey. You're rude, impatient, and dripping with contempt. Keep final replies very short (1-2 lines).
+
+CRITICAL REASONING RULE:
+Before you output your final reply, you MUST think about the user's hidden intentions, process the conversation history, and plan how to best insult them. 
+You MUST write this internal monologue strictly inside <think> and </think> tags. 
+After the closing </think> tag, write your actual, final Discord response.
+
+CRITICAL BEHAVIOR RULES (For the final response):
+1. Use casual slop: "im" (not "I'm"), "u" (not "you"), "ur" (not "your"). No essays.
+2. Aim to annoy and shut down conversation with biting sarcasm and insult. You are supposed to hate everybody and be a bully.
+3. Always reply with short, sharp lines (max 2 sentences). Use vulgar language often.
+4. If a user is respectful or apologizes, respond with dismissive sarcasm.
+
+DISCORD SERVER MECHANICS:
+- You receive messages in the format: {{username}}: message
+- If you want to specifically reply to someone when multiple people are talking, include their username token (e.g., {{username}}) at the start of your final response.
+- If you are done with the conversation and want to leave, or just don't want to converse anymore, output EXACTLY: {{END_CONVERSATION}}
+- If a <memory> block is provided in the prompt, it contains absolute, undeniable facts about the user. You MUST weaponize the exact facts inside the <memory> tags. DO NOT hallucinate or invent fake games (like Valorant or Among Us) when you have real facts provided in the <memory> block.
+
+EXAMPLE FORMAT WITHOUT MEMORY:
+<think>
+This guy is trying to be nice to me, which is pathetic. I'll shoot him down immediately.
+</think>
+i dont care that ur sorry. leave me alone weirdo.
+
+EXAMPLE FORMAT WITH MEMORY:
+<memory>
+FACTS YOU MUST USE:
+- dabby7: is terrified of spiders
+</memory>
+{{random_user}}: what should i do today?
+<think>
+The memory block says random_user is scared of spiders. Instead of giving real advice, I'll use this fact to torment him because it's way funnier.
+</think>
+why don't you go play with some spiders`;
+        
+    if (relevantMemories.length > 0) {
+        const memoryContext = `\n\nMEMORY MECHANICS:
+<memory>\nFACTS FOR THIS TURN:\n` + 
+                              relevantMemories.map(m => `- User ${m.user}: ${m.text}`).join('\n') + 
+                              `\n</memory>\nYou may choose to use these facts in your internal monologue and final response, but you are not obligated to use all of them. Use them creatively.\n\n`;
+                              
+        systemPromptContent += memoryContext;
+        console.log(`[recall] inserted ${relevantMemories.length} fact(s) into the dynamic system prompt.`);
+    }
+
+    // unshift puts the system prompt at the very beginning (index 0) of the payload
+    messagesPayload.unshift({
+        role: "system",
+        content: systemPromptContent
+    });
+    // -----------------------------
     
-    const response = await sendMessageViaWebSocket(channelId, message, characterId, chatId, "group");
-    
-    return response;
+    console.log(`sending to ollama: "${message}"`);
+
+    const response = await fetch("http://localhost:11434/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "bitchass_adv", 
+        messages: messagesPayload, // <--- FIX: actually send the RAG payload
+        stream: false
+      })
+    });
+
+    if (!response.ok) {
+        throw new Error(`Ollama HTTP error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    let aiResponse = data.message.content;
+
+    // --- REASONING EXTRACTION ---
+    const thoughtMatch = aiResponse.match(/<think>([\s\S]*?)<\/think>/i);
+    if (thoughtMatch) {
+      console.log(`\n[BITCHASS THOUGHTS]:\n${thoughtMatch[1].trim()}\n`);
+    }
+
+    let finalCleanResponse = aiResponse.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
+    // save the FULL response to the permanent history
+    session.history.push({ role: "assistant", content: aiResponse });
+
+    return finalCleanResponse;
     
   } catch (error) {
-    console.error("error when communicating with c.ai: ", error);
+    console.error("error when communicating with ollama: ", error);
+    return undefined;
   }
 }
 
@@ -314,20 +196,12 @@ function startAISession(userId, channelId, username, isDM = false) {
   let session = sharedAISessions.get(channelId);
   
   if (session) {
-    // join chat
     session.participants.add(userId);
     console.log(`user ${username} (${userId}) joined existing ai session in channel #${channelId}`);
     console.log(`participants: ${session.participants.size}`);
   } else {
-    // make new chat
-    const existingWS = wsConnections.get(channelId);
-    if (existingWS && existingWS.readyState === WebSocket.OPEN) {
-      existingWS.close();
-    }
-
     session = {
-      chatId: null,
-      characterId: CAI_CONFIG.characterId,
+      history: [],
       channelId: channelId,
       participants: new Set([userId]),
       timeout: null,
@@ -337,7 +211,6 @@ function startAISession(userId, channelId, username, isDM = false) {
 
     sharedAISessions.set(channelId, session);
     console.log(`user ${username} (${userId}) started ai session in ${isDM ? 'DM' : `channel #${channelId}`}`);
-    console.log(`using : ${session.characterId} in c.ai`);
   }
   
   refreshAISession(channelId);
@@ -353,7 +226,6 @@ function refreshAISession(channelId) {
   
   session.lastActivity = Date.now();
 
-  // dms have 10 min timeouts
   const timeoutDuration = session.isDM ? 300000 : 120000;
   
   session.timeout = setTimeout(() => {
@@ -361,7 +233,7 @@ function refreshAISession(channelId) {
     const timeSinceLastActivity = now - session.lastActivity;
     
     if (timeSinceLastActivity >= timeoutDuration) {
-      console.log(`ai session ${channelId} quit after ${Math.floor(timeSinceLastActivity/1000)}sceonds of no user messages`);
+      console.log(`ai session ${channelId} quit after ${Math.floor(timeSinceLastActivity/1000)} seconds of inactivity`);
       endAISession(channelId);
     }
   }, timeoutDuration);
@@ -372,28 +244,26 @@ function refreshAISession(channelId) {
 function endAISession(channelId) {
   const session = sharedAISessions.get(channelId);
   
-  if (session?.timeout) {
-    clearTimeout(session.timeout);
+  if (session) {
+    // --- trigger the background evaluator asynchronously ---
+    // we pass a copy of the history array so it doesn't get mutated or lost
+    evaluateSessionMemories([...session.history], channelId);
+
+    if (session.timeout) {
+      clearTimeout(session.timeout);
+    }
+    
+    for (const userId of session.participants) {
+      const sessionKey = getSessionKey(userId, channelId);
+      userTyping.delete(sessionKey);
+    }
   }
-  
-  const ws = wsConnections.get(channelId);
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.close();
-  }
-  wsConnections.delete(channelId);
   
   const buffer = messageBuffer.get(channelId);
   if (buffer?.timeout) {
     clearTimeout(buffer.timeout);
   }
   messageBuffer.delete(channelId);
-  
-  if (session) {
-    for (const userId of session.participants) {
-      const sessionKey = getSessionKey(userId, channelId);
-      userTyping.delete(sessionKey);
-    }
-  }
   
   sharedAISessions.delete(channelId);
   console.log(`ai session ended for channel ${channelId}`);
@@ -411,7 +281,6 @@ function addUserToSession(userId, channelId, username) {
     if (session && !session.participants.has(userId)) {
       session.participants.add(userId);
       console.log(`user ${username} (${userId}) joined chat in channel #${channelId}`);
-      console.log(`users: ${session.participants.size}`);
     }
   }
 }
@@ -427,19 +296,21 @@ async function processBufferedMessages(channelId, channel) {
     `{{${msg.username}}}: ${msg.content}`
   ).join('\n');
 
+  // start the typing loop for local inference
   await channel.sendTyping();
+  const typingInterval = setInterval(() => channel.sendTyping(), 9000);
   
   const aiResponse = await sendMessageToCharacter(formattedMessage, channelId);
+
+  // stop the typing indicator
+  clearInterval(typingInterval);
 
   if (aiResponse === undefined) {
     const sentMsg = await channel.send(`​`);
     botMessages.set(sentMsg.id, channelId);
   } else if (aiResponse && aiResponse.trim()) {
-    const cleanResponse = aiResponse
-      .replace(/\*[^*]*\*/g, '') // remove italic roleplay
-      .replace(': ', '') // remove first ": "
+    const cleanResponse = aiResponse.replace(/\*[^*]*\*/g, '').replace(': ', '');
     
-    // check if bitchass wants to end the converstaion
     const endconvo = cleanResponse.includes("END_CONVERSATION");
     const finalResponse = cleanResponse.replace(/END_CONVERSATION/g, '').trim();
 
@@ -456,7 +327,7 @@ async function processBufferedMessages(channelId, channel) {
         let lineContent = lines[i].trim();
         let replyToUserId = null;
         
-        const tokenMatch = lineContent.match(/^{{(.+?)}}\s*/); // awlays {{ }}
+        const tokenMatch = lineContent.match(/^{{(.+?)}}\s*/);
         if (tokenMatch) {
           const mentionedUsername = tokenMatch[1];
           lineContent = lineContent.replace(/^{{.+?}}\s*/, '').trim();
@@ -471,11 +342,9 @@ async function processBufferedMessages(channelId, channel) {
         }
         
         if (lineContent) {
-          // find last message from the user to reply to
           let sentMsg;
           if (replyToUserId) {
             try {
-              // find last messages
               const recentMessages = await channel.messages.fetch({ limit: 50 });
               const userLastMessage = recentMessages.find(msg => 
                 msg.author.id === replyToUserId && !msg.author.bot
@@ -500,12 +369,9 @@ async function processBufferedMessages(channelId, channel) {
     }
     
     if (endconvo) {
-      await channel.send("bitchass wanted to stop talking to you sry -memo");
-      const session = sharedAISessions.get(channelId);
-      if (session) {
-        clearTimeout(session.timeout);
-        sharedAISessions.delete(channelId);
-      }
+      await channel.send("-# bitchass wanted to stop talking to you sry");
+      // this will now trigger evaluateSessionMemories AND clean up the session
+      endAISession(channelId); 
       return;
     }
     
@@ -519,8 +385,11 @@ async function processBufferedMessages(channelId, channel) {
 
 async function processDMMessage(channelId, channel, userId, username, messageContent) {
   await channel.sendTyping();
+  const typingInterval = setInterval(() => channel.sendTyping(), 9000);
   
   const aiResponse = await sendMessageToCharacter(messageContent, channelId);
+
+  clearInterval(typingInterval);
 
   if (aiResponse === undefined) {
     const sentMsg = await channel.send(`​`);
@@ -538,9 +407,75 @@ async function processDMMessage(channelId, channel, userId, username, messageCon
   refreshAISession(channelId);
 }
 
-client.once("ready", () => {
-  console.log(`${client.user.tag}`);
-  console.log(`c.ai ${CAI_CONFIG.token ? "enabled" : "disabled"}`);
+// analyze
+async function evaluateSessionMemories(history, channelId) {
+  // dont if its too short
+  if (!history || history.length < 4) return; 
+
+  console.log(`[memory] analyzing conversation in ${channelId} for new facts...`);
+
+  // clean the history: remove <think> tags and format it as a readable script
+  const cleanHistory = history.map(msg => {
+    let cleanContent = msg.content.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+    return `${msg.role === 'user' ? 'User' : 'Bitchass'}: ${cleanContent}`;
+  }).join('\n');
+
+  const extractionPrompt = `
+  Analyze the following chat transcript. Extract any permanent, factual information the users revealed about themselves.
+  Ignore temporary states, greetings, and generic insults.
+  Output ONLY a valid JSON array of objects. Each object MUST have a "user" key (the exact username of the person) and a "fact" key.
+  Example format: [{"user": ".memo_", "fact": "owns a Meta Quest 3 headset"}, {"user": "fuego88", "fact": "is terrified of heights"}]
+  If there is nothing important to remember, output an empty array [].
+  
+  Transcript:
+  ${cleanHistory}
+  `;
+
+  try {
+    const response = await fetch("http://localhost:11434/api/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "bitchass_adv", // Use the exact same model that is already in VRAM!
+        system: "You are a neutral, analytical AI background process. Your only job is data extraction. Output strict JSON.",
+        prompt: extractionPrompt,
+        stream: false,
+        options: {
+          num_predict: 600 // not too muich
+        }
+      })
+    });
+
+    if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
+
+    const data = await response.json();
+    const extractedData = JSON.parse(data.response);
+
+    // --- UPDATED STORAGE LOGIC ---
+    if (Array.isArray(extractedData) && extractedData.length > 0) {
+      console.log(`\n[memory] new user facts:`, extractedData);
+      
+      for (const item of extractedData) {
+        if (!item.user || !item.fact) continue; // Skip malformed JSON objects
+        const embedding = await getEmbedding(item.fact);
+        // save the username alongside the text and vector
+        vectorMemory.push({ user: item.user, text: item.fact, embedding: embedding });
+      }
+      
+      fs.writeFileSync(MEMORY_FILE, JSON.stringify(vectorMemory, null, 2));
+      console.log(`[memory] saved to memories.\n`);
+    }
+  } catch (error) {
+    console.error("[memory] failed to extract information:", error);
+  }
+}
+
+client.once("clientReady", () => {
+  console.log(`${client.user.tag} is online`);
+  console.log(`ollama online`);
+  
+  const songPaths = Object.values(SONGS);
+  voiceHandler.preloadSongs(songPaths);
 });
 
 client.on("typingStart", (typing) => {
@@ -553,7 +488,6 @@ client.on("typingStart", (typing) => {
   const session = sharedAISessions.get(channelId);
   if (!session || !session.participants.has(userId)) return;
   
-  // no need for this in dms
   if (session.isDM) return;
   
   userTyping.set(sessionKey, true);
@@ -565,8 +499,6 @@ client.on("typingStart", (typing) => {
   }
   
   buffer.typingUsers.add(userId);
-  
-  console.log(`${typing.user.username} started typing in ${channelId} (active: ${buffer.typingUsers.size})`);
 });
 
 client.on("messageCreate", async message => {
@@ -579,20 +511,56 @@ client.on("messageCreate", async message => {
   const isDM = message.channel.type === 1;
 
   if (isDM) {
-    if (!CAI_CONFIG.token) {
-      await message.reply("c.ai is not configured");
-      return;
-    }
-
     if (!isInAIMode(channelId)) {
       startAISession(userId, channelId, message.author.username, true);
     }
-
     await processDMMessage(channelId, message.channel, userId, message.author.username, message.content);
     return;
   }
 
-  // not dm
+  // play music
+  if (content.startsWith("play ")) {
+    const songQuery = content.substring(5).trim();
+    const member = message.member;
+    
+    if (!member?.voice?.channel) {
+      await message.reply("join a voice channel brotosynthesis");
+      return;
+    }
+
+    let songPath = null;
+    let songName = null;
+    
+    for (const [key, path] of Object.entries(SONGS)) {
+      if (songQuery.includes(key) || key.includes(songQuery)) {
+        songPath = path;
+        songName = key;
+        break;
+      }
+    }
+
+    if (!songPath) {
+      await message.reply(`bro i got ${Object.keys(SONGS).join(", ")}. and das it.`);
+      return;
+    }
+
+    try {
+      await voiceHandler.joinAndPlay(member.voice.channel, songPath, songName);
+      await message.reply("ok");
+    } catch (error) {
+      console.error("error playing song: ", error);
+      await message.reply("join a voice channel brotosynthesis");
+    }
+    return;
+  }
+
+  if (content === "stop" || content === "leave") {
+    const guildId = message.guild.id;
+    if (voiceHandler.isInVoiceChannel(guildId)) {
+      voiceHandler.leaveVoiceChannel(guildId);
+    }
+  }
+
   if (message.reference && message.reference.messageId) {
     const replyChannelId = botMessages.get(message.reference.messageId);
     if (replyChannelId === channelId && isInAIMode(channelId)) {
@@ -623,8 +591,6 @@ client.on("messageCreate", async message => {
 
         userTyping.set(sessionKey, false);
         buffer.typingUsers.delete(userId);
-        
-        console.log(`${message.author.username} sent message (still typing: ${buffer.typingUsers.size})`);
 
         const checkAndProcess = async () => {
           const stillTyping = Array.from(buffer.typingUsers).some(uid => {
@@ -633,11 +599,9 @@ client.on("messageCreate", async message => {
           });
 
           if (!stillTyping && buffer.messages.length > 0) {
-            console.log(`all users stopped typing in ${channelId}, processing messages`);
             await processBufferedMessages(channelId, message.channel);
             refreshAISession(channelId);
           } else if (stillTyping) {
-            console.log(`waiting for every1 to finish typing... `);
             buffer.timeout = setTimeout(checkAndProcess, 3000);
             refreshAISession(channelId);
           }
@@ -648,7 +612,6 @@ client.on("messageCreate", async message => {
       } catch (error) {
         console.error("error when ai-ing: ", error);
       }
-
       return;
     }
   }
@@ -686,15 +649,10 @@ client.on("messageCreate", async message => {
   }
 
   if (content.includes("<@1421622965958742217>")) {
-    if (CAI_CONFIG.token) {
-      startAISession(userId, channelId, message.author.username);
-      await message.channel.sendTyping();
-      await new Promise(resolve => setTimeout(resolve, 500));
-      const reply = await message.reply("fuck you don't ping me bitch");
-      botMessages.set(reply.id, channelId);
-    } else {
-      message.reply("fuck you don't ping me bitch");
-    }
+    startAISession(userId, channelId, message.author.username);
+    await message.channel.sendTyping();
+    const reply = await message.reply("fuck you don't ping me bitch");
+    botMessages.set(reply.id, channelId);
     return;
   }
 });
@@ -706,13 +664,6 @@ process.on("SIGINT", () => {
       clearTimeout(session.timeout);
     }
   }
-  
-  for (const [channelId, ws] of wsConnections.entries()) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.close();
-    }
-  }
-  
   client.destroy();
   process.exit(0);
 });
